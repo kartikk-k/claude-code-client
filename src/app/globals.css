@@ -1,26 +1,176 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/*
+ * Aside design system — theme tokens
+ * Values captured pixel-for-pixel from Figma (node 1:2 dark / 1:237 light).
+ * Only colors differ between themes; every dimension is shared.
+ */
+
+:root,
+:root[data-theme="light"] {
+  --app-bg: #f8f8f8;
+  /* light: the main content panel is the same flat #f8f8f8; white cards
+     float on top of it (rows are solid #fff). */
+  --panel-bg: #f8f8f8;
+  --panel-border: rgba(10, 10, 10, 0.1);
+  --row-bg: #ffffff;
+  /* light: card has a visible outer border + a hairline divider between rows */
+  --card-border: rgba(10, 10, 10, 0.1);
+  --row-divider: rgba(10, 10, 10, 0.1);
+  --control-bg: rgba(10, 10, 10, 0.05);
+  --control-border: rgba(10, 10, 10, 0.1);
+  --nav-active-bg: rgba(10, 10, 10, 0.05);
+
+  /* chat page */
+  --bubble-bg: rgba(10, 10, 10, 0.08);
+  --composer-bg: #ffffff;
+  --card-float-bg: #ffffff;
+
+  --text-strong: #0a0a0a;
+  --text-primary: rgba(10, 10, 10, 0.95);
+  --text-secondary: rgba(10, 10, 10, 0.55);
+  --text-heading: rgba(10, 10, 10, 0.44);
+  --text-faint: rgba(10, 10, 10, 0.33);
+
+  /* solid / inverse button */
+  --btn-solid-bg: #0a0a0a;
+  --btn-solid-text: rgba(250, 250, 250, 0.95);
+
+  --link: rgba(0, 132, 209, 0.8);
+  --switch-on: #00bc7d;
+  --switch-knob: #ffffff;
+
+  --rail-dot: #0a0a0a;
+
+  /* claude-client: code + tool cards (light) */
+  --code-bg: rgba(10, 10, 10, 0.05);
+  --code-header-bg: rgba(10, 10, 10, 0.04);
+  --code-text: #24292e;
+  --code-keyword: #d73a49;
+  --code-string: #032f62;
+  --code-fn: #6f42c1;
+  --code-comment: #6a737d;
+  --code-number: #005cc5;
+  --tool-bg: rgba(10, 10, 10, 0.04);
+  --agent-accent: #7c5cff;
+}
+
+:root[data-theme="dark"] {
+  --app-bg: #202020;
+  --panel-bg: rgba(23, 23, 23, 0.8);
+  --panel-border: rgba(250, 250, 250, 0.1);
+  --row-bg: rgba(250, 250, 250, 0.06);
+  /* dark: card has no visible outer border; the row divider matches the
+     content-area bg so the 1px border between rows reads as a gap. */
+  --card-border: transparent;
+  --row-divider: #181818;
+  --control-bg: rgba(250, 250, 250, 0.03);
+  --control-border: rgba(250, 250, 250, 0.1);
+  --nav-active-bg: rgba(250, 250, 250, 0.15);
+
+  /* chat page */
+  --bubble-bg: rgba(250, 250, 250, 0.08);
+  --composer-bg: rgba(250, 250, 250, 0.08);
+  --card-float-bg: #404040;
+
+  --text-strong: #fafafa;
+  --text-primary: rgba(250, 250, 250, 0.85);
+  --text-secondary: rgba(250, 250, 250, 0.55);
+  --text-heading: rgba(250, 250, 250, 0.44);
+  --text-faint: rgba(250, 250, 250, 0.33);
+
+  /* solid / inverse button */
+  --btn-solid-bg: rgba(250, 250, 250, 0.85);
+  --btn-solid-text: rgba(10, 10, 10, 0.85);
+
+  --link: rgba(0, 188, 255, 0.8);
+  --switch-on: #00bc7d;
+  --switch-knob: #ffffff;
+
+  --rail-dot: #fafafa;
+
+  /* claude-client: code + tool cards (dark) — GitHub-dark palette from Figma */
+  --code-bg: rgba(250, 250, 250, 0.11);
+  --code-header-bg: rgba(23, 23, 23, 0.5);
+  --code-text: #e1e4e8;
+  --code-keyword: #f97583;
+  --code-string: #9ecbff;
+  --code-fn: #b392f0;
+  --code-comment: #6a737d;
+  --code-number: #79b8ff;
+  --tool-bg: rgba(250, 250, 250, 0.05);
+  --agent-accent: #a78bfa;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-app-bg: var(--app-bg);
+  --color-panel-bg: var(--panel-bg);
+  --color-panel-border: var(--panel-border);
+  --color-row-bg: var(--row-bg);
+  --color-card-border: var(--card-border);
+  --color-row-divider: var(--row-divider);
+  --color-control-bg: var(--control-bg);
+  --color-control-border: var(--control-border);
+  --color-nav-active-bg: var(--nav-active-bg);
+  --color-bubble-bg: var(--bubble-bg);
+  --color-composer-bg: var(--composer-bg);
+  --color-card-float-bg: var(--card-float-bg);
+
+  --color-text-strong: var(--text-strong);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-heading: var(--text-heading);
+  --color-text-faint: var(--text-faint);
+
+  --color-btn-solid-bg: var(--btn-solid-bg);
+  --color-btn-solid-text: var(--btn-solid-text);
+
+  --color-link: var(--link);
+  --color-switch-on: var(--switch-on);
+  --color-switch-knob: var(--switch-knob);
+  --color-rail-dot: var(--rail-dot);
+
+  --font-sans: var(--font-geist);
+  --font-display: var(--font-display);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  color-scheme: light dark;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--app-bg);
+  color: var(--text-strong);
+  font-family: var(--font-geist), system-ui, sans-serif;
+}
+
+/*
+ * Smooth theme cross-fade.
+ *
+ * The fade is driven ONLY while the <html> element carries `data-theme-fade`,
+ * which the ThemeToggle sets for the duration of a switch. Transitioning on a
+ * blanket `*` rule made translucent surfaces layered over `backdrop-blur`
+ * (the panel, rows) re-composite every frame and flicker; gating it to the
+ * toggle window keeps hover/idle repaints transition-free and flash-free.
+ *
+ * IMPORTANT: we transition SURFACES only (background + border). Animating
+ * `color` on a large text subtree makes the browser flip text antialiasing
+ * (subpixel <-> grayscale) for the animation's duration, which reads as the
+ * text flickering. Text swaps color instantly instead — imperceptible against
+ * the fading surfaces, and flicker-free.
+ */
+:root[data-theme-fade] *,
+:root[data-theme-fade] *::before,
+:root[data-theme-fade] *::after {
+  transition-property: background-color, border-color;
+  transition-duration: 260ms;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme-fade] *,
+  :root[data-theme-fade] *::before,
+  :root[data-theme-fade] *::after {
+    transition-duration: 0.01ms !important;
+  }
 }

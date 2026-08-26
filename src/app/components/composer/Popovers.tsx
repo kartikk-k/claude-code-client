@@ -1,0 +1,605 @@
+"use client";
+
+/**
+ * Popover menus for the RichComposer.
+ *
+ * Exports:
+ *  - Popover        shared absolute-positioned card wrapper
+ *  - MenuRow        shared row (icon + title + description + trailing)
+ *  - PermissionMenu approval-mode picker
+ *  - SlashMenu      "/" command menu + skills
+ *  - MentionMenu    "@" file picker
+ *  - AddMenu        "+" add attachments / plugins menu
+ *
+ * Styling follows the aside-ui composer conventions and uses only the
+ * globals.css theme tokens via Tailwind utilities. Icons come from the shared
+ * chat icons set (stable base glyphs) plus the local popoverIcons.tsx additions.
+ */
+
+import {
+  CheckIcon,
+  ShieldIcon,
+  SparkleIcon,
+  AttachIcon,
+} from "../../chat/components/icons";
+import {
+  AlertIcon,
+  DocsIcon,
+  LinkIcon,
+  SplitIcon,
+  StarIcon,
+  ActivityIcon,
+  CardIcon,
+  TargetIcon,
+  CompassIcon,
+  RecordIcon,
+} from "./popoverIcons";
+
+/* -------------------------------------------------------------------------- */
+/* Shared primitives                                                          */
+/* -------------------------------------------------------------------------- */
+
+/** Raised popover surface. Absolute-positioned by the parent via className. */
+export function Popover({
+  children,
+  className = "",
+  role = "menu",
+  ...props
+}: React.HTMLAttributes<HTMLDivElement>) {
+  return (
+    <div
+      role={role}
+      className={[
+        "absolute z-50 rounded-[16.8px] border border-panel-border bg-panel-bg p-1.5",
+        "shadow-[0px_10px_30px_-5px_rgba(0,0,0,0.5)]",
+        className,
+      ].join(" ")}
+      {...props}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** A single selectable row inside a popover. */
+export function MenuRow({
+  icon,
+  title,
+  titleNode,
+  description,
+  descriptionAlign = "right",
+  trailing,
+  active = false,
+  accent = false,
+  disabled = false,
+  onClick,
+}: {
+  icon?: React.ReactNode;
+  /** Plain title text (also used for keys / a11y). */
+  title: string;
+  /** Optional rich title (e.g. a highlighted match); falls back to `title`. */
+  titleNode?: React.ReactNode;
+  description?: string;
+  /** Description sits to the right of the title, or beneath it. */
+  descriptionAlign?: "right" | "below";
+  trailing?: React.ReactNode;
+  active?: boolean;
+  /** Warning / destructive emphasis (orange-ish accent token). */
+  accent?: boolean;
+  disabled?: boolean;
+  onClick?: () => void;
+}) {
+  const titleColor = accent
+    ? "text-[color:var(--agent-accent)]"
+    : disabled
+      ? "text-text-faint"
+      : "text-text-strong";
+  const iconColor = accent
+    ? "text-[color:var(--agent-accent)]"
+    : disabled
+      ? "text-text-faint"
+      : "text-text-secondary";
+
+  const titleEl = (
+    <span
+      className={[
+        "text-sm font-medium leading-5",
+        descriptionAlign === "right" ? "shrink-0 whitespace-nowrap" : "truncate",
+        titleColor,
+      ].join(" ")}
+    >
+      {titleNode ?? title}
+    </span>
+  );
+
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      aria-disabled={disabled || undefined}
+      disabled={disabled}
+      onClick={disabled ? undefined : onClick}
+      className={[
+        "flex w-full items-center gap-3 rounded-[11.2px] px-3 py-2 text-left transition-colors",
+        disabled
+          ? "cursor-default opacity-60"
+          : "cursor-pointer hover:bg-nav-active-bg",
+        active && !disabled ? "bg-nav-active-bg" : "",
+      ].join(" ")}
+    >
+      {icon !== undefined ? (
+        <span
+          className={[
+            "flex size-4 shrink-0 items-center justify-center",
+            iconColor,
+          ].join(" ")}
+        >
+          {icon}
+        </span>
+      ) : null}
+
+      {descriptionAlign === "below" ? (
+        <span className="flex min-w-0 flex-1 flex-col">
+          {titleEl}
+          {description ? (
+            <span className="truncate text-xs leading-4 text-text-secondary">
+              {description}
+            </span>
+          ) : null}
+        </span>
+      ) : (
+        <>
+          {titleEl}
+          {description ? (
+            <span className="ml-auto truncate pl-4 text-right text-xs leading-4 text-text-secondary">
+              {description}
+            </span>
+          ) : null}
+        </>
+      )}
+
+      {trailing !== undefined ? (
+        <span
+          className={[
+            "shrink-0",
+            // If nothing else pushed to the right, push the trailing element.
+            descriptionAlign === "below" || !description ? "ml-auto" : "",
+          ].join(" ")}
+        >
+          {trailing}
+        </span>
+      ) : null}
+    </button>
+  );
+}
+
+/** Section heading placed between groups of rows. */
+function MenuHeading({
+  children,
+  right,
+}: {
+  children: React.ReactNode;
+  right?: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center justify-between px-3 pb-1 pt-2">
+      <span className="text-xs font-medium leading-4 text-text-secondary">
+        {children}
+      </span>
+      {right}
+    </div>
+  );
+}
+
+/** Small pill tag (e.g. "Personal") shown at the right edge of a row. */
+function ScopeTag({ label }: { label: string }) {
+  return (
+    <span className="rounded-full border border-control-border bg-control-bg px-2 py-0.5 text-[11px] font-medium leading-4 text-text-secondary">
+      {label}
+    </span>
+  );
+}
+
+const activeCheck = (
+  <CheckIcon width={16} height={16} className="text-text-strong" />
+);
+
+/* -------------------------------------------------------------------------- */
+/* 1) PermissionMenu                                                          */
+/* -------------------------------------------------------------------------- */
+
+export type PermissionValue = "plan" | "acceptEdits" | "bypassPermissions";
+
+type PermissionOption = {
+  value: PermissionValue;
+  title: string;
+  description: string;
+  icon: React.ReactNode;
+  accent?: boolean;
+};
+
+const PERMISSION_OPTIONS: PermissionOption[] = [
+  {
+    value: "plan",
+    title: "Ask for approval",
+    description: "Always ask before edits and running commands",
+    icon: <ShieldIcon width={16} height={16} />,
+  },
+  {
+    value: "acceptEdits",
+    title: "Approve for me",
+    description: "Only ask for actions detected as potentially unsafe",
+    icon: <ShieldIcon width={16} height={16} />,
+  },
+  {
+    value: "bypassPermissions",
+    title: "Full access",
+    description: "Unrestricted access to files and commands",
+    icon: <AlertIcon width={16} height={16} />,
+    accent: true,
+  },
+];
+
+export function PermissionMenu({
+  value,
+  onChange,
+  onClose,
+  className = "",
+}: {
+  value: PermissionValue;
+  onChange: (value: PermissionValue) => void;
+  onClose: () => void;
+  className?: string;
+}) {
+  return (
+    <Popover className={["min-w-[320px]", className].join(" ")}>
+      <MenuHeading
+        right={
+          <a
+            href="#"
+            onClick={(e) => e.preventDefault()}
+            className="text-xs leading-4 text-link hover:underline"
+          >
+            Learn more
+          </a>
+        }
+      >
+        How should Claude be approved?
+      </MenuHeading>
+
+      {PERMISSION_OPTIONS.map((opt) => (
+        <MenuRow
+          key={opt.value}
+          icon={opt.icon}
+          title={opt.title}
+          description={opt.description}
+          descriptionAlign="below"
+          accent={opt.accent}
+          active={value === opt.value}
+          trailing={value === opt.value ? activeCheck : undefined}
+          onClick={() => {
+            onChange(opt.value);
+            onClose();
+          }}
+        />
+      ))}
+    </Popover>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* 2) SlashMenu                                                               */
+/* -------------------------------------------------------------------------- */
+
+export type SlashSkill = {
+  name: string;
+  description: string;
+  scope?: string;
+};
+
+export type SlashItem =
+  | { kind: "action"; id: string; title: string; description: string }
+  | { kind: "skill"; skill: SlashSkill };
+
+const SLASH_ACTIONS: {
+  id: string;
+  title: string;
+  description: string;
+  icon: React.ReactNode;
+}[] = [
+  {
+    id: "share",
+    title: "Share thread",
+    description: "Create a link to a snapshot of this thread",
+    icon: <LinkIcon width={16} height={16} />,
+  },
+  {
+    id: "side",
+    title: "Side",
+    description: "Start a temporary side chat",
+    icon: <SplitIcon width={16} height={16} />,
+  },
+  {
+    id: "star",
+    title: "Star",
+    description: "Pin or unpin the current chat",
+    icon: <StarIcon width={16} height={16} />,
+  },
+  {
+    id: "status",
+    title: "Status",
+    description: "Show chat ID, context usage, and rate limits",
+    icon: <ActivityIcon width={16} height={16} />,
+  },
+  {
+    id: "usage",
+    title: "Usage & billing",
+    description: "Open usage and billing settings",
+    icon: <CardIcon width={16} height={16} />,
+  },
+];
+
+const DEFAULT_SKILLS: SlashSkill[] = [
+  {
+    name: "commit",
+    description: "Craft a conventional commit message",
+    scope: "Personal",
+  },
+  {
+    name: "review-pr",
+    description: "Review the current pull request diff",
+    scope: "Personal",
+  },
+  {
+    name: "write-tests",
+    description: "Generate tests for the selected code",
+    scope: "Personal",
+  },
+];
+
+export function SlashMenu({
+  onPick,
+  onClose,
+  skills = DEFAULT_SKILLS,
+  className = "",
+}: {
+  onPick: (item: SlashItem) => void;
+  onClose: () => void;
+  skills?: SlashSkill[];
+  className?: string;
+}) {
+  return (
+    <Popover className={["min-w-[360px]", className].join(" ")}>
+      {SLASH_ACTIONS.map((a) => (
+        <MenuRow
+          key={a.id}
+          icon={a.icon}
+          title={a.title}
+          description={a.description}
+          descriptionAlign="right"
+          onClick={() => {
+            onPick({
+              kind: "action",
+              id: a.id,
+              title: a.title,
+              description: a.description,
+            });
+            onClose();
+          }}
+        />
+      ))}
+
+      <MenuHeading>Skills</MenuHeading>
+      {skills.map((skill) => (
+        <MenuRow
+          key={skill.name}
+          icon={<SparkleIcon width={16} height={16} />}
+          title={skill.name}
+          description={skill.description}
+          descriptionAlign="right"
+          trailing={skill.scope ? <ScopeTag label={skill.scope} /> : undefined}
+          onClick={() => {
+            onPick({ kind: "skill", skill });
+            onClose();
+          }}
+        />
+      ))}
+    </Popover>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* 3) MentionMenu                                                             */
+/* -------------------------------------------------------------------------- */
+
+export type MentionFile = {
+  name: string;
+  path?: string;
+};
+
+const DEFAULT_FILES: MentionFile[] = [
+  { name: "README.md" },
+  { name: "README.md", path: "e2e" },
+  { name: "package.json" },
+  { name: "tsconfig.json" },
+  { name: "next.config.ts" },
+  { name: "globals.css", path: "src/app" },
+];
+
+/** Highlights the portion of `text` matching `query` (case-insensitive). */
+function Highlight({ text, query }: { text: string; query: string }) {
+  const q = query.trim();
+  if (!q) return <span className="text-text-strong">{text}</span>;
+  const idx = text.toLowerCase().indexOf(q.toLowerCase());
+  if (idx === -1) return <span className="text-text-strong">{text}</span>;
+  return (
+    <span className="text-text-secondary">
+      {text.slice(0, idx)}
+      <span className="text-text-strong">{text.slice(idx, idx + q.length)}</span>
+      {text.slice(idx + q.length)}
+    </span>
+  );
+}
+
+export function MentionMenu({
+  query,
+  files = DEFAULT_FILES,
+  onPick,
+  onClose,
+  className = "",
+}: {
+  query: string;
+  files?: MentionFile[];
+  onPick: (file: MentionFile) => void;
+  onClose: () => void;
+  className?: string;
+}) {
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? files.filter(
+        (f) =>
+          f.name.toLowerCase().includes(q) ||
+          (f.path ? f.path.toLowerCase().includes(q) : false),
+      )
+    : files;
+
+  return (
+    <Popover className={["min-w-[300px]", className].join(" ")}>
+      {filtered.length === 0 ? (
+        <div className="px-3 py-2 text-sm leading-5 text-text-secondary">
+          No files found
+        </div>
+      ) : (
+        filtered.map((file) => (
+          <MenuRow
+            key={`${file.path ?? ""}/${file.name}`}
+            icon={<DocsIcon width={16} height={16} />}
+            title={file.name}
+            titleNode={<Highlight text={file.name} query={query} />}
+            trailing={
+              file.path ? (
+                <span className="truncate text-xs leading-4 text-text-faint">
+                  {file.path}
+                </span>
+              ) : undefined
+            }
+            onClick={() => {
+              onPick(file);
+              onClose();
+            }}
+          />
+        ))
+      )}
+    </Popover>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* 4) AddMenu                                                                 */
+/* -------------------------------------------------------------------------- */
+
+export type AddPlugin = {
+  id: string;
+  name: string;
+  description: string;
+  icon?: React.ReactNode;
+};
+
+export type AddItem =
+  | { kind: "action"; id: string; title: string }
+  | { kind: "plugin"; plugin: AddPlugin };
+
+const ADD_ACTIONS: {
+  id: string;
+  title: string;
+  description?: string;
+  icon: React.ReactNode;
+  disabled?: boolean;
+}[] = [
+  {
+    id: "files",
+    title: "Files and folders",
+    icon: <AttachIcon width={16} height={16} />,
+  },
+  {
+    id: "appshot",
+    title: "Attach appshot",
+    icon: <DocsIcon width={16} height={16} />,
+    disabled: true,
+  },
+  {
+    id: "goal",
+    title: "Goal",
+    description: "Set a goal to keep pursuing",
+    icon: <TargetIcon width={16} height={16} />,
+  },
+  {
+    id: "plan",
+    title: "Plan mode",
+    description: "Turn plan mode on",
+    icon: <CompassIcon width={16} height={16} />,
+  },
+  {
+    id: "record",
+    title: "Record a skill",
+    icon: <RecordIcon width={16} height={16} />,
+  },
+];
+
+const DEFAULT_PLUGINS: AddPlugin[] = [
+  { id: "linear", name: "Linear", description: "Issues and projects" },
+  { id: "documents", name: "Documents", description: "Reference your docs" },
+  { id: "pdf", name: "PDF", description: "Read and extract from PDFs" },
+  {
+    id: "spreadsheets",
+    name: "Spreadsheets",
+    description: "Query rows and cells",
+  },
+];
+
+export function AddMenu({
+  onPick,
+  onClose,
+  plugins = DEFAULT_PLUGINS,
+  className = "",
+}: {
+  onPick: (item: AddItem) => void;
+  onClose: () => void;
+  plugins?: AddPlugin[];
+  className?: string;
+}) {
+  return (
+    <Popover className={["min-w-[320px]", className].join(" ")}>
+      <MenuHeading>Add</MenuHeading>
+      {ADD_ACTIONS.map((a) => (
+        <MenuRow
+          key={a.id}
+          icon={a.icon}
+          title={a.title}
+          description={a.description}
+          descriptionAlign="right"
+          disabled={a.disabled}
+          onClick={() => {
+            onPick({ kind: "action", id: a.id, title: a.title });
+            onClose();
+          }}
+        />
+      ))}
+
+      <MenuHeading>Plugins</MenuHeading>
+      {plugins.map((plugin) => (
+        <MenuRow
+          key={plugin.id}
+          icon={plugin.icon ?? <SparkleIcon width={16} height={16} />}
+          title={plugin.name}
+          description={plugin.description}
+          descriptionAlign="right"
+          onClick={() => {
+            onPick({ kind: "plugin", plugin });
+            onClose();
+          }}
+        />
+      ))}
+    </Popover>
+  );
+}

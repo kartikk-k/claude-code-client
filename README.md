@@ -1,36 +1,73 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Claude Client
 
-## Getting Started
+A local web client for **Claude Code**. It reads your session data straight from
+`~/.claude` and lets you browse projects, read transcripts (with tool calls and
+sub-agents rendered), and send new messages — a comfortable UI instead of the
+terminal.
 
-First, run the development server:
+Everything runs on your machine. Nothing leaves your computer except the calls
+the `claude` CLI already makes on your behalf.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## How it works
+
+```
+~/.claude/projects/**          ┌──────────────────────┐        ┌────────────────┐
+  <session>.jsonl        ─────▶ │  Bun + Hono server   │ ─────▶ │  Next.js app   │
+  agent-*.jsonl                 │  (reads data,        │  API   │  (renders +    │
+                                │   shells out to      │        │   interacts)   │
+`claude` CLI  ◀──── spawn ───── │   `claude -p …`)     │        └────────────────┘
+                                └──────────────────────┘
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+- **Server** (`/server`, Bun + Hono) — parses the JSONL transcripts into
+  structured messages/tools/sub-agents and exposes them over a small HTTP API.
+  To send a message it spawns `claude -p --resume <sessionId> --output-format
+  stream-json …` in the session's working directory and streams the response
+  back as SSE. Verified against Claude Code **2.1.212**.
+- **Client** (`/src`, Next.js 16 + React 19 + Tailwind v4) — the chat UI, reusing
+  the Aside design system: session sidebar, conversation renderer, collapsible
+  sub-agents panel, and a rich composer.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Run it
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+# one command — starts the data server (:4317) and the client (:3000)
+./start.sh
+```
 
-## Learn More
+Or run the two halves separately:
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+bun run server    # data server on :4317
+bun run client    # Next.js on :3000
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Requires [Bun](https://bun.sh) and the `claude` CLI on your `PATH`.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## API (server)
 
-## Deploy on Vercel
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/projects` | List projects (decoded cwd, session count, last activity) |
+| GET | `/api/projects/:id/sessions` | Sessions in a project |
+| GET | `/api/projects/:pid/sessions/:sid` | Full parsed transcript + sub-agents |
+| GET | `/api/projects/:pid/sessions/:sid/agents` | Sub-agent transcripts only |
+| POST | `/api/message` | Send a prompt; streams `stream-json` back as SSE |
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+`POST /api/message` body: `{ cwd, sessionId?, newSessionId?, prompt, images?, model?, permissionMode? }`.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Composer — beyond the terminal
+
+The composer adds things the stock CLI has no UI for:
+
+- **Image drop & paste** — drop or paste screenshots straight in.
+- **Context annotations** — inline `@file` and `<context>` chips, tag-like.
+- **`/` menu** — thread actions + skills.
+- **`@` menu** — fuzzy file tagging.
+- **`+` menu** — add files/folders, plan mode, plugins/MCPs.
+- **Permission modes** — Ask for approval · Approve for me · Full access.
+
+## Safety
+
+The server never uses `--dangerously-skip-permissions`. Message sends default to
+`--permission-mode acceptEdits`; you choose the mode per-send in the composer.
