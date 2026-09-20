@@ -25,14 +25,15 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
-  MicIcon,
   ArrowUpIcon,
   PlusCircleIcon,
   ShieldIcon,
   SparkleIcon,
+  SparkleSingleIcon,
   ChevronDownIcon,
   XIcon,
   FolderIcon,
+  FileIcon,
   GitBranchIcon,
 } from "../chat/components/icons";
 import {
@@ -65,6 +66,8 @@ export type RichComposerProps = {
   cwd?: string;
   /** Active session's git branch, if any — drives the branch chip. */
   gitBranch?: string;
+  /** Open a file attachment in the right sidebar's Preview tab. */
+  onOpenInPanel?: (file: { name: string; url: string; mime: string }) => void;
 };
 
 /** Last path segment of a cwd, for the context-bar folder chip. */
@@ -73,7 +76,30 @@ function cwdBasename(cwd: string): string {
   return parts[parts.length - 1] || cwd;
 }
 
-type Thumb = { id: string; url: string; name: string };
+/** An attachment kind, deciding how it renders + what "opening" it does. */
+type AttachKind = "image" | "text" | "other";
+type Thumb = {
+  id: string;
+  url: string;
+  name: string;
+  kind: AttachKind;
+  /** MIME type (best-effort). */
+  mime: string;
+};
+
+/** Classify a file into an attachment kind. */
+function classifyFile(name: string, mime: string): AttachKind {
+  if (mime.startsWith("image/")) return "image";
+  if (
+    mime.startsWith("text/") ||
+    /\.(txt|md|markdown|json|ya?ml|csv|log|tsx?|jsx?|css|html?|xml|sh)$/i.test(
+      name
+    )
+  ) {
+    return "text";
+  }
+  return "other"; // pdf, docx, binaries, folders, …
+}
 // permission + model are owned by Base UI menus; only these live in local state.
 type OpenMenu = "none" | "slash" | "mention" | "add";
 
@@ -212,14 +238,19 @@ export function RichComposer({
   disabled = false,
   cwd,
   gitBranch,
+  onOpenInPanel,
 }: RichComposerProps) {
   const editorRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
+  // `images` holds ALL attachments (images + files); the name is kept for churn.
   const [images, setImages] = useState<Thumb[]>([]);
   const [hasText, setHasText] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  // The image currently shown in the lightbox preview (null = closed).
+  const [previewImage, setPreviewImage] = useState<Thumb | null>(null);
 
   const [model, setModel] = useState("sonnet");
   const [effort, setEffort] = useState<EffortLevel>("Medium");
@@ -378,10 +409,15 @@ export function RichComposer({
 
   /* ------------------------------ handlers ------------------------------- */
 
-  const addImageFiles = useCallback((files: FileList | File[]) => {
-    Array.from(files)
-      .filter((f) => f.type.startsWith("image/"))
-      .forEach((file) => {
+  /** Add any files (images, text, PDFs, …). Each is read to a data URL and
+   *  appended as an attachment. Non-image / non-text files (PDF, binaries)
+   *  auto-open in the right sidebar's Preview tab on add. */
+  const addFiles = useCallback(
+    (files: FileList | File[]) => {
+      Array.from(files).forEach((file) => {
+        const name = file.name || "file";
+        const mime = file.type || "";
+        const kind = classifyFile(name, mime);
         const reader = new FileReader();
         reader.onload = () => {
           const url = String(reader.result);
@@ -390,22 +426,26 @@ export function RichComposer({
             {
               id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
               url,
-              name: file.name || "image",
+              name,
+              kind,
+              mime,
             },
           ]);
+          // Non-image/non-text (e.g. PDF) opens in the sidebar automatically.
+          if (kind === "other") onOpenInPanel?.({ name, url, mime });
         };
         reader.readAsDataURL(file);
       });
-  }, []);
+    },
+    [onOpenInPanel]
+  );
 
   const onPaste = useCallback(
     (e: React.ClipboardEvent<HTMLDivElement>) => {
-      const imgs = Array.from(e.clipboardData.files).filter((f) =>
-        f.type.startsWith("image/")
-      );
-      if (imgs.length > 0) {
+      const files = Array.from(e.clipboardData.files);
+      if (files.length > 0) {
         e.preventDefault();
-        addImageFiles(imgs);
+        addFiles(files);
         return;
       }
       // Force plain-text paste so no foreign markup enters the editor.
@@ -416,16 +456,16 @@ export function RichComposer({
         e.clipboardData.getData("text/plain")
       );
     },
-    [addImageFiles]
+    [addFiles]
   );
 
   const onDrop = useCallback(
     (e: React.DragEvent<HTMLDivElement>) => {
       e.preventDefault();
       setDragOver(false);
-      if (e.dataTransfer.files.length > 0) addImageFiles(e.dataTransfer.files);
+      if (e.dataTransfer.files.length > 0) addFiles(e.dataTransfer.files);
     },
-    [addImageFiles]
+    [addFiles]
   );
 
   /** Delegated click on the editor: handle pill "×" removal. */
@@ -486,10 +526,12 @@ export function RichComposer({
       if (item.kind === "action") {
         if (item.id === "files") {
           fileInputRef.current?.click();
+        } else if (item.id === "folder") {
+          folderInputRef.current?.click();
         } else if (item.id === "goal" || item.id === "plan") {
           insertAtCaret(makePill("context", item.id, item.title));
         }
-        // Other actions (appshot, record) are UI-only placeholders for now.
+        // Other actions (record) are UI-only placeholders for now.
       } else {
         insertAtCaret(makePill("context", item.plugin.id, item.plugin.name));
       }
@@ -570,24 +612,35 @@ export function RichComposer({
     <div ref={rootRef} className="shrink-0 pb-2.5">
       <div className="mx-auto w-full max-w-[896px] px-8">
         <div className="w-full">
-          {/* Context bar — folder + optional branch, tucked above the input.
-              "Local" is implied (it's always local) so it isn't shown. */}
+          {/* Context bar — its own rounded surface (bg + border + padding) that
+              tucks behind the input's rounded top so the two read as one stacked
+              card. "Local" is implied (always local) so it isn't shown. */}
           {showContextBar ? (
-            <div className="flex items-center gap-4 px-3 pb-2.5 text-text-secondary">
-              <span className="flex min-w-0 items-center gap-1.5">
-                <FolderIcon width={16} height={16} className="shrink-0 icon-muted" />
-                <span className="truncate text-sm font-medium leading-5">
+            <div
+              className={[
+                "relative z-0 mx-1 flex items-center gap-4 rounded-t-[16px] border border-b-0 border-panel-border bg-composer-bg px-4 pb-5 pt-2.5 text-text-strong backdrop-blur-xl",
+                // Pull the input up so it overlaps the bottom of this bar.
+                "-mb-3",
+              ].join(" ")}
+            >
+              <span className="flex min-w-0 items-center gap-2">
+                <FolderIcon
+                  width={17}
+                  height={17}
+                  className="shrink-0 text-text-strong"
+                />
+                <span className="truncate text-[15px] font-medium leading-5">
                   {folderName}
                 </span>
               </span>
               {gitBranch ? (
-                <span className="flex min-w-0 items-center gap-1.5">
+                <span className="flex min-w-0 items-center gap-2">
                   <GitBranchIcon
-                    width={16}
-                    height={16}
-                    className="shrink-0 icon-muted"
+                    width={17}
+                    height={17}
+                    className="shrink-0 text-text-strong"
                   />
-                  <span className="truncate text-sm font-medium leading-5">
+                  <span className="truncate text-[15px] font-medium leading-5">
                     {gitBranch}
                   </span>
                 </span>
@@ -597,6 +650,21 @@ export function RichComposer({
 
           {/* Input surface */}
           <div
+            onMouseDown={(e) => {
+              // Clicking anywhere on the surface (padding, empty area) focuses
+              // the editor — but never steal mousedown from an interactive
+              // control (buttons/pills) so those still work.
+              const target = e.target as HTMLElement;
+              if (
+                target === editorRef.current ||
+                target.closest("button") ||
+                target.closest('[role="menu"]')
+              ) {
+                return;
+              }
+              e.preventDefault();
+              editorRef.current?.focus();
+            }}
             onDragOver={(e) => {
               e.preventDefault();
               setDragOver(true);
@@ -607,38 +675,99 @@ export function RichComposer({
             }}
             onDrop={onDrop}
             className={[
-              "relative rounded-[20px] bg-composer-bg transition-shadow",
+              "relative z-10 rounded-[20px] bg-composer-bg backdrop-blur-xl transition-shadow",
               dragOver
                 ? "shadow-[0px_0px_0px_2px_var(--agent-accent),0px_4px_6px_-1px_rgba(0,0,0,0.05)]"
                 : "shadow-[0px_0px_0px_1px_var(--panel-border),0px_4px_6px_-1px_rgba(0,0,0,0.05),0px_2px_4px_-2px_rgba(0,0,0,0.05)]",
             ].join(" ")}
           >
-            {/* Thumbnail row */}
+            {/* Attachment row — image thumbnails (click → preview) and file
+                cards (click → open in the right sidebar). */}
             {images.length > 0 ? (
-              <div className="flex flex-wrap gap-2 px-[42px] pt-3">
-                {images.map((img) => (
-                  <div
-                    key={img.id}
-                    className="group relative size-14 overflow-hidden rounded-lg border border-panel-border bg-bubble-bg"
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={img.url}
-                      alt={img.name}
-                      className="size-full object-cover"
-                    />
-                    <button
-                      type="button"
-                      aria-label={`Remove ${img.name}`}
-                      onClick={() =>
-                        setImages((prev) => prev.filter((i) => i.id !== img.id))
-                      }
-                      className="absolute right-0.5 top-0.5 flex size-4 items-center justify-center rounded-full bg-btn-solid-bg text-btn-solid-text opacity-0 transition-opacity group-hover:opacity-100"
+              <div className="flex flex-wrap gap-2.5 px-4 pt-3">
+                {images.map((att) =>
+                  att.kind === "image" ? (
+                    <div
+                      key={att.id}
+                      className="group relative size-16 overflow-hidden rounded-xl border border-panel-border bg-bubble-bg"
                     >
-                      <XIcon width={10} height={10} />
-                    </button>
-                  </div>
-                ))}
+                      <button
+                        type="button"
+                        aria-label={`Preview ${att.name}`}
+                        onClick={() => setPreviewImage(att)}
+                        className="block size-full"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={att.url}
+                          alt={att.name}
+                          className="size-full object-cover"
+                        />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Remove ${att.name}`}
+                        onClick={() =>
+                          setImages((prev) =>
+                            prev.filter((i) => i.id !== att.id)
+                          )
+                        }
+                        className="absolute right-1 top-1 flex size-5 items-center justify-center rounded-full bg-btn-solid-bg text-btn-solid-text opacity-0 shadow transition-opacity group-hover:opacity-100"
+                      >
+                        <XIcon width={11} height={11} />
+                      </button>
+                    </div>
+                  ) : (
+                    <div
+                      key={att.id}
+                      className="group relative flex h-16 w-52 items-center gap-2.5 overflow-hidden rounded-xl border border-panel-border bg-bubble-bg px-3"
+                    >
+                      <button
+                        type="button"
+                        aria-label={`Open ${att.name}`}
+                        onClick={() =>
+                          onOpenInPanel?.({
+                            name: att.name,
+                            url: att.url,
+                            mime: att.mime,
+                          })
+                        }
+                        className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+                      >
+                        <span
+                          className={[
+                            "flex size-9 shrink-0 items-center justify-center rounded-lg text-white",
+                            att.kind === "text"
+                              ? "bg-[#3b7dd8]"
+                              : "bg-[#d64545]",
+                          ].join(" ")}
+                        >
+                          <FileIcon width={18} height={18} />
+                        </span>
+                        <span className="flex min-w-0 flex-col">
+                          <span className="truncate text-[13px] font-medium leading-4 text-text-strong">
+                            {att.name}
+                          </span>
+                          <span className="text-[11px] leading-4 text-text-secondary">
+                            {att.kind === "text" ? "Text" : "File"}
+                          </span>
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Remove ${att.name}`}
+                        onClick={() =>
+                          setImages((prev) =>
+                            prev.filter((i) => i.id !== att.id)
+                          )
+                        }
+                        className="absolute right-1 top-1 flex size-5 items-center justify-center rounded-full bg-btn-solid-bg text-btn-solid-text opacity-0 shadow transition-opacity group-hover:opacity-100"
+                      >
+                        <XIcon width={11} height={11} />
+                      </button>
+                    </div>
+                  )
+                )}
               </div>
             ) : null}
 
@@ -647,7 +776,7 @@ export function RichComposer({
               {placeholderVisible ? (
                 <span
                   aria-hidden
-                  className="pointer-events-none absolute left-[42px] top-2 text-sm leading-[22.75px] text-text-secondary"
+                  className="pointer-events-none absolute left-4 top-3 text-[15px] leading-[22.75px] text-text-secondary"
                 >
                   Do anything
                 </span>
@@ -664,78 +793,36 @@ export function RichComposer({
                 onKeyUp={detectTriggers}
                 onPaste={onPaste}
                 onClick={onEditorClick}
-                className="max-h-[357px] min-h-[88px] w-full overflow-y-auto whitespace-pre-wrap break-words px-[42px] py-2 text-sm leading-[22.75px] text-text-strong outline-none [word-break:break-word]"
+                className="max-h-[300px] min-h-[64px] w-full overflow-y-auto whitespace-pre-wrap break-words px-4 pt-3 pb-1 text-[15px] leading-[22.75px] text-text-strong outline-none [word-break:break-word]"
               />
             </div>
 
-            {/* Add (left) */}
-            <div className="absolute left-[5px] top-[5.75px]">
-              <button
-                type="button"
-                aria-label="Add attachment"
-                aria-haspopup="menu"
-                aria-expanded={menu === "add"}
-                onClick={() => toggle("add")}
-                className="flex size-7 items-center justify-center rounded-full border-[0.556px] border-transparent bg-bubble-bg icon-muted transition-opacity hover:opacity-100"
-              >
-                <PlusCircleIcon width={16} height={16} />
-              </button>
-              {menu === "add" ? (
-                <AddMenu
-                  onPick={onAddPick}
-                  onClose={closeMenu}
-                  activeIndex={activeIndex}
-                  className="bottom-9 left-0"
-                />
-              ) : null}
-            </div>
+            {/* Bottom toolbar — INSIDE the surface. Left: add + permission.
+                Right: model + effort + send. */}
+            <div className="flex items-center gap-1 px-2 pb-2 pt-0.5">
+              {/* Add */}
+              <div className="relative shrink-0">
+                <button
+                  type="button"
+                  aria-label="Add attachment"
+                  aria-haspopup="menu"
+                  aria-expanded={menu === "add"}
+                  onClick={() => toggle("add")}
+                  className="flex size-8 items-center justify-center rounded-full text-text-secondary transition-colors hover:bg-bubble-bg hover:text-text-strong"
+                >
+                  <PlusCircleIcon width={20} height={20} />
+                </button>
+                {menu === "add" ? (
+                  <AddMenu
+                    onPick={onAddPick}
+                    onClose={closeMenu}
+                    activeIndex={activeIndex}
+                    className="bottom-10 left-0"
+                  />
+                ) : null}
+              </div>
 
-            {/* Mic + Send (right) */}
-            <div className="absolute right-[5px] top-[5.75px] flex items-center gap-1">
-              <button
-                type="button"
-                aria-label="Dictate"
-                className="flex size-7 items-center justify-center rounded-full border-[0.556px] border-transparent icon-muted transition-[opacity,background-color] hover:bg-bubble-bg hover:opacity-100"
-              >
-                <MicIcon />
-              </button>
-              <button
-                type="button"
-                aria-label="Send message"
-                disabled={!canSend}
-                onClick={doSend}
-                className={[
-                  "flex size-7 items-center justify-center rounded-full bg-btn-solid-bg text-btn-solid-text transition-opacity",
-                  canSend ? "opacity-100" : "opacity-50",
-                ].join(" ")}
-              >
-                <ArrowUpIcon width={18} height={18} />
-              </button>
-            </div>
-
-            {/* Trigger menus, anchored above the input */}
-            {menu === "slash" ? (
-              <SlashMenu
-                onPick={onSlashPick}
-                onClose={closeMenu}
-                activeIndex={activeIndex}
-                className="bottom-full left-[42px] mb-2"
-              />
-            ) : null}
-            {menu === "mention" ? (
-              <MentionMenu
-                query={mentionQuery}
-                onPick={onMentionPick}
-                onClose={closeMenu}
-                activeIndex={activeIndex}
-                className="bottom-full left-[42px] mb-2"
-              />
-            ) : null}
-          </div>
-
-          {/* Toolbar */}
-          <div className="flex items-center py-1">
-            <div className="flex flex-1 items-center">
+              {/* Permission */}
               <PermissionMenu
                 value={permission}
                 onChange={setPermission}
@@ -743,28 +830,32 @@ export function RichComposer({
                   <PillButton
                     icon={
                       permission === "bypassPermissions" ? (
-                        <SparkleIcon width={14} height={14} />
+                        <SparkleIcon width={15} height={15} />
                       ) : (
-                        <ShieldIcon width={14} height={14} />
+                        <ShieldIcon width={15} height={15} />
                       )
                     }
                     label={permPill.label}
                     accent={permPill.accent}
+                    chevron={false}
                     ariaLabel="Permission mode"
                   />
                 }
               />
-            </div>
 
-            <div className="flex items-center">
+              {/* Spacer */}
+              <div className="flex-1" />
+
+              {/* Model + effort */}
               <ModelMenu
                 value={model}
                 options={MODEL_OPTIONS}
                 onChange={setModel}
                 trigger={
                   <PillButton
-                    icon={<SparkleIcon width={14} height={14} />}
+                    icon={<SparkleSingleIcon width={15} height={15} />}
                     label={modelLabel}
+                    chevron={false}
                     ariaLabel="Model"
                   />
                 }
@@ -780,20 +871,98 @@ export function RichComposer({
                   />
                 }
               />
+
+              {/* Send */}
+              <button
+                type="button"
+                aria-label="Send message"
+                disabled={!canSend}
+                onClick={doSend}
+                className={[
+                  "flex size-8 shrink-0 items-center justify-center rounded-full bg-btn-solid-bg text-btn-solid-text transition-opacity",
+                  canSend ? "opacity-100" : "opacity-50",
+                ].join(" ")}
+              >
+                <ArrowUpIcon width={18} height={18} />
+              </button>
             </div>
+
+            {/* Trigger menus, anchored above the input */}
+            {menu === "slash" ? (
+              <SlashMenu
+                onPick={onSlashPick}
+                onClose={closeMenu}
+                activeIndex={activeIndex}
+                className="bottom-full left-4 mb-2"
+              />
+            ) : null}
+            {menu === "mention" ? (
+              <MentionMenu
+                query={mentionQuery}
+                onPick={onMentionPick}
+                onClose={closeMenu}
+                activeIndex={activeIndex}
+                className="bottom-full left-4 mb-2"
+              />
+            ) : null}
           </div>
         </div>
       </div>
 
-      {/* Hidden file input for the "Files and folders" add action */}
+      {/* Image preview lightbox — click a thumbnail to open the full image. */}
+      {previewImage ? (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-8 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Preview ${previewImage.name}`}
+          onClick={() => setPreviewImage(null)}
+        >
+          <div
+            className="relative max-h-full max-w-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              aria-label="Close preview"
+              onClick={() => setPreviewImage(null)}
+              className="absolute -right-3 -top-3 flex size-8 items-center justify-center rounded-full bg-btn-solid-bg text-btn-solid-text shadow-lg"
+            >
+              <XIcon width={14} height={14} />
+            </button>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={previewImage.url}
+              alt={previewImage.name}
+              className="max-h-[80vh] max-w-[80vw] rounded-xl object-contain shadow-2xl"
+            />
+            <p className="mt-3 text-center text-sm text-white/80">
+              {previewImage.name}
+            </p>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Hidden inputs for the "Files" (any type) + "Folder" add actions. */}
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*"
         multiple
         hidden
         onChange={(e) => {
-          if (e.target.files) addImageFiles(e.target.files);
+          if (e.target.files) addFiles(e.target.files);
+          e.target.value = "";
+        }}
+      />
+      <input
+        ref={folderInputRef}
+        type="file"
+        multiple
+        hidden
+        // Non-standard but widely supported directory picker.
+        {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+        onChange={(e) => {
+          if (e.target.files) addFiles(e.target.files);
           e.target.value = "";
         }}
       />

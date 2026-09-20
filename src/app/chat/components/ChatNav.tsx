@@ -5,6 +5,8 @@ import {
   DotsIcon,
   ListReorderIcon,
   PanelRightClosedIcon,
+  BottomPanelOpenIcon,
+  BottomPanelClosedIcon,
 } from "./icons";
 import { ChangesMenu } from "../../components/ChangesMenu";
 import { ChatOptionsMenu } from "../../components/ChatOptionsMenu";
@@ -43,10 +45,14 @@ export function ChatNav({
   title,
   rightPanelOpen = true,
   onToggleRightPanel,
+  bottomPanelOpen = false,
+  onToggleBottomPanel,
 }: {
   title: string;
   rightPanelOpen?: boolean;
   onToggleRightPanel?: () => void;
+  bottomPanelOpen?: boolean;
+  onToggleBottomPanel?: () => void;
 }) {
   return (
     <header className="flex h-11 shrink-0 items-center px-1.5">
@@ -88,6 +94,24 @@ export function ChatNav({
             </IconButton>
           }
         />
+        {/* Bottom-panel toggle. Only shown when the right panel is HIDDEN — while
+            it's open, the right panel's own header already carries this control,
+            so we don't duplicate it here. Glyph reflects open/closed state. */}
+        {!rightPanelOpen ? (
+          <Tooltip label="Toggle bottom panel" shortcut="⌘J" side="bottom">
+            <IconButton
+              label="Toggle bottom panel"
+              onClick={onToggleBottomPanel}
+              className={bottomPanelOpen ? "bg-bubble-bg opacity-100" : ""}
+            >
+              {bottomPanelOpen ? (
+                <BottomPanelOpenIcon width={18} height={18} />
+              ) : (
+                <BottomPanelClosedIcon width={18} height={18} />
+              )}
+            </IconButton>
+          </Tooltip>
+        ) : null}
         {/* Show-panel control. Only rendered when the panel is HIDDEN — while
             the panel is open it owns its own collapse control in its header, so
             we don't duplicate it here. */}

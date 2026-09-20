@@ -21,6 +21,7 @@ import {
   ShieldIcon,
   SparkleIcon,
   AttachIcon,
+  FolderIcon,
 } from "../../chat/components/icons";
 import {
   AlertIcon,
@@ -475,14 +476,15 @@ const ADD_ACTIONS: {
 }[] = [
   {
     id: "files",
-    title: "Files and folders",
+    title: "Files",
+    description: "Attach images, PDFs, text, or any file",
     icon: <AttachIcon width={16} height={16} />,
   },
   {
-    id: "appshot",
-    title: "Attach appshot",
-    icon: <DocsIcon width={16} height={16} />,
-    disabled: true,
+    id: "folder",
+    title: "Folder",
+    description: "Attach a whole folder",
+    icon: <FolderIcon width={16} height={16} />,
   },
   {
     id: "goal",

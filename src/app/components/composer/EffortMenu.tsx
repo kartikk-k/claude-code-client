@@ -7,7 +7,11 @@
  * effort levels; dragging or clicking a stop selects it.
  */
 import { Popover } from "@base-ui-components/react/popover";
-import { SparkleIcon, RefreshIcon } from "../../chat/components/icons";
+import {
+  SparkleSingleIcon,
+  RefreshIcon,
+  ChevronRightIcon,
+} from "../../chat/components/icons";
 
 export const EFFORT_LEVELS = ["Minimal", "Low", "Medium", "High", "Max"] as const;
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
@@ -40,14 +44,19 @@ export function EffortMenu({
           >
             {/* Header: lightning + current effort + model, reset on the right */}
             <div className="flex items-center gap-2">
-              <SparkleIcon
+              <SparkleSingleIcon
                 width={16}
                 height={16}
                 className="text-[color:var(--agent-accent)]"
               />
               <div className="flex flex-1 flex-col items-center">
-                <span className="text-sm font-semibold leading-5 text-[color:var(--agent-accent)]">
+                <span className="flex items-center gap-0.5 text-sm font-semibold leading-5 text-[color:var(--agent-accent)]">
                   {value}
+                  <ChevronRightIcon
+                    width={14}
+                    height={14}
+                    className="opacity-90"
+                  />
                 </span>
                 <span className="text-xs leading-4 text-text-secondary">
                   {modelLabel}
@@ -91,7 +100,7 @@ export function EffortMenu({
                         className={[
                           "rounded-full transition-transform duration-150",
                           active
-                            ? "size-4 border-2 border-[color:var(--agent-accent)] bg-white"
+                            ? "size-4 bg-white shadow-[0_1px_3px_rgba(0,0,0,0.4)]"
                             : "size-2 bg-text-faint",
                         ].join(" ")}
                         style={{ transitionTimingFunction: "var(--ease-out-quart)" }}

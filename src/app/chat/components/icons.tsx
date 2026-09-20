@@ -53,6 +53,7 @@ import {
   ShieldGlyph,
   SidebarGlyph,
   SparkleGlyph,
+  SparkleSingleGlyph,
   StarGlyph,
   TargetGlyph,
   TerminalGlyph,
@@ -80,6 +81,12 @@ import {
   TerminalTabGlyph,
   SideChatTabGlyph,
   ListReorderGlyph,
+  BottomPanelClosedGlyph,
+  BottomPanelOpenGlyph,
+  ArchiveGlyph,
+  LaptopGlyph,
+  ChatBubblePlusGlyph,
+  FolderPointerGlyph,
 } from "../../components/icons/IconStore";
 
 /** Union of the Nucleo icon keys these components are built from. */
@@ -154,6 +161,7 @@ export const ArrowUpIcon = ArrowUpGlyph;
 export const FolderIcon = FolderGlyph;
 export const ShieldIcon = ShieldGlyph;
 export const SparkleIcon = SparkleGlyph;
+export const SparkleSingleIcon = SparkleSingleGlyph;
 export const GithubIcon = BranchGlyph; // repo/branch glyph
 export const AddTabIcon = PlusGlyph;
 export const PlusIcon = PlusGlyph;
@@ -212,3 +220,9 @@ export const FilesTabIcon = FilesTabGlyph;
 export const TerminalTabIcon = TerminalTabGlyph;
 export const SideChatTabIcon = SideChatTabGlyph;
 export const ListReorderIcon = ListReorderGlyph;
+export const BottomPanelClosedIcon = BottomPanelClosedGlyph;
+export const BottomPanelOpenIcon = BottomPanelOpenGlyph;
+export const ArchiveIcon = ArchiveGlyph;
+export const LaptopIcon = LaptopGlyph;
+export const ChatBubblePlusIcon = ChatBubblePlusGlyph;
+export const FolderPointerIcon = FolderPointerGlyph;

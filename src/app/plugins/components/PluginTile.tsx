@@ -10,9 +10,9 @@
  */
 
 /** Base surface for brand-logo tiles that have no background of their own. */
-const TILE_BG = "#202020";
+const TILE_BG = "rgba(0, 0, 0, 0.4)";
 /** Shared surface for letter-mark tiles (no SVG icon) — one gray for all. */
-const MARK_BG = "#2c2c2c";
+const MARK_BG = "#5A5A5A";
 
 /**
  * Neomorphic layering: a diagonal light→dark gradient for the raised face, an
@@ -24,14 +24,11 @@ function neomorphic(base: string): {
   boxShadow: string;
 } {
   return {
-    background: `linear-gradient(150deg, ${shade(base, 7)} 0%, ${base} 45%, ${shade(
-      base,
-      -8
-    )} 100%)`,
+    background: `rgba(255, 255, 255, 0.1)`,
     boxShadow: [
-      "inset 0 1px 0 rgba(255,255,255,0.10)",
-      "inset 0 -1px 1px rgba(0,0,0,0.35)",
-      "0 2px 5px rgba(0,0,0,0.40)",
+      // "inset 0 1px 0 rgba(255,255,255,0.10)",
+      // "inset 0 -1px 1px rgba(0,0,0,0.35)",
+      // "0 2px 5px rgba(0,0,0,0.40)",
     ].join(", "),
   };
 }

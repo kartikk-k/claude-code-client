@@ -17,6 +17,7 @@ import { TocRail, type TocItem } from "./components/TocRail";
 import { PrCard, extractPrUrl } from "./components/PrCard";
 import { TooltipProvider } from "./components/ui/Tooltip";
 import { RichComposer } from "./components/RichComposer";
+import { BottomTerminalPanel } from "./components/BottomTerminalPanel";
 import { ChatNav } from "./chat/components/ChatNav";
 
 /** Flatten a message's text blocks into a single string. */
@@ -74,9 +75,18 @@ export function ClientShell() {
   const [serverError, setServerError] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
+  // Bottom terminal panel that spans the chat column (toggled via ⌘J or the
+  // header button); animates open/closed.
+  const [bottomPanelOpen, setBottomPanelOpen] = useState(false);
   // Right panel expanded to full width — the chat column is hidden so the
   // panel spans from the sidebar all the way to the window edge.
   const [rightPanelFull, setRightPanelFull] = useState(false);
+  // A file opened from a composer attachment, shown in the panel's Preview tab.
+  const [previewFile, setPreviewFile] = useState<{
+    name: string;
+    url: string;
+    mime: string;
+  } | null>(null);
   // Transcript scroll container — observed by the table-of-contents rail.
   const scrollRef = useRef<HTMLDivElement>(null);
   const resolveAnchor = useCallback(
@@ -126,6 +136,10 @@ export function ClientShell() {
       if ((e.metaKey || e.ctrlKey) && e.key === ",") {
         e.preventDefault();
         router.push("/settings");
+      }
+      if ((e.metaKey || e.ctrlKey) && (e.key === "j" || e.key === "J")) {
+        e.preventDefault();
+        setBottomPanelOpen((v) => !v);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -278,6 +292,12 @@ export function ClientShell() {
         />
       </div>
 
+      {/* Chat + right panel + bottom panel. A vertical stack: the top row is the
+          chat column beside the right panel (horizontal), and the bottom panel
+          sits below BOTH — so it spans the chat area plus the right sidebar, but
+          not the left sidebar. */}
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <div className="flex min-h-0 flex-1 overflow-hidden">
       {/* Main conversation column. In full-width mode it animates its flex-grow
           to 0 (collapsing to width 0 via flex-basis:0 + min-w-0 + overflow) so
           the right panel — which grows to flex-1 — smoothly expands to fill.
@@ -297,6 +317,8 @@ export function ClientShell() {
           title={transcript?.title ?? "Claude Client"}
           rightPanelOpen={rightPanelOpen}
           onToggleRightPanel={() => setRightPanelOpen((v) => !v)}
+          bottomPanelOpen={bottomPanelOpen}
+          onToggleBottomPanel={() => setBottomPanelOpen((v) => !v)}
         />
         <div className="relative flex flex-1 overflow-hidden">
           {/* Table-of-contents rail, overlaid on the left edge of the
@@ -314,7 +336,10 @@ export function ClientShell() {
             </div>
           ) : null}
 
-          <div ref={scrollRef} className="flex-1 overflow-y-auto">
+          {/* Scrollable transcript. Extra bottom padding reserves space so the
+              last messages can scroll up ABOVE the floating composer instead of
+              being hidden behind it. */}
+          <div ref={scrollRef} className="flex-1 overflow-y-auto pb-[180px]">
             {serverError ? (
               <div className="mx-auto max-w-[832px] px-8 py-6 text-sm text-text-secondary">
                 Couldn&apos;t reach the local server. Start it with{" "}
@@ -346,13 +371,24 @@ export function ClientShell() {
               </div>
             )}
           </div>
+
+          {/* Composer floats on top of the transcript (which scrolls behind it).
+              Its backdrop blur keeps it readable over the content underneath. */}
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20">
+            <div className="pointer-events-auto">
+              <RichComposer
+                onSend={onSend}
+                disabled={sending || !active}
+                cwd={transcript?.cwd}
+                gitBranch={transcript?.gitBranch}
+                onOpenInPanel={(f) => {
+                  setPreviewFile(f);
+                  setRightPanelOpen(true);
+                }}
+              />
+            </div>
+          </div>
         </div>
-        <RichComposer
-          onSend={onSend}
-          disabled={sending || !active}
-          cwd={transcript?.cwd}
-          gitBranch={transcript?.gitBranch}
-        />
       </div>
 
       {/* Right: resizable tabbed panel (Review / Terminal / Browser / Files /
@@ -365,7 +401,20 @@ export function ClientShell() {
           if (!next) setRightPanelFull(false);
         }}
         onFullWidthChange={setRightPanelFull}
+        bottomPanelOpen={bottomPanelOpen}
+        onToggleBottomPanel={() => setBottomPanelOpen((v) => !v)}
+        previewFile={previewFile}
       />
+        </div>
+
+        {/* Bottom terminal panel — spans the chat column AND the right panel
+            (everything except the left sidebar). Animated + height-adjustable. */}
+        <BottomTerminalPanel
+          open={bottomPanelOpen}
+          cwd={transcript?.cwd}
+          onClose={() => setBottomPanelOpen(false)}
+        />
+      </div>
       {/* activeAgent handling retained for future wiring into the panel. */}
       {activeAgent ? null : null}
     </div>

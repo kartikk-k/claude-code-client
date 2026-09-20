@@ -1,6 +1,6 @@
 "use client";
 
-import { forwardRef, useCallback, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useRef, useState } from "react";
 import {
   ReviewIcon,
   TerminalTabIcon,
@@ -15,7 +15,8 @@ import {
   DotsIcon,
   PanelRightOpenIcon,
   ExpandFullIcon,
-  MinimizeIcon,
+  BottomPanelOpenIcon,
+  BottomPanelClosedIcon,
 } from "../chat/components/icons";
 import { Tooltip } from "./ui/Tooltip";
 
@@ -30,8 +31,19 @@ export type DiffFile = {
   kind?: string;
 };
 
-/** The set of openable tabs. `'none'` renders the empty tab-list state. */
-type TabId = "none" | "review" | "terminal" | "browser" | "files" | "sidechat";
+/** The set of openable tabs. `'none'` renders the empty tab-list state.
+ *  `'preview'` is dynamic — shown only when an attachment is opened. */
+type TabId =
+  | "none"
+  | "review"
+  | "terminal"
+  | "browser"
+  | "files"
+  | "sidechat"
+  | "preview";
+
+/** A file opened for preview in the right panel (from a composer attachment). */
+export type PreviewFile = { name: string; url: string; mime: string };
 
 type TabDef = {
   id: Exclude<TabId, "none">;
@@ -81,6 +93,12 @@ export type RightPanelProps = {
   /** Notifies the shell when the panel enters/leaves full-width mode, so the
    *  shell can hide the chat column and let the panel span the whole area. */
   onFullWidthChange?: (full: boolean) => void;
+  /** Shared bottom-terminal-panel state, owned by the shell (the panel lives in
+   *  the chat column now). The header's ⌘J button just toggles it. */
+  bottomPanelOpen?: boolean;
+  onToggleBottomPanel?: () => void;
+  /** A file opened from a composer attachment — shown in the Preview tab. */
+  previewFile?: PreviewFile | null;
 };
 
 export function RightPanel({
@@ -90,12 +108,23 @@ export function RightPanel({
   open = true,
   onOpenChange,
   onFullWidthChange,
+  bottomPanelOpen = false,
+  onToggleBottomPanel,
+  previewFile = null,
 }: RightPanelProps) {
   const [tab, setTab] = useState<TabId>(defaultTab);
+
+  // When a file is opened from the composer, jump to the Preview tab (and make
+  // sure the panel is open). Keyed on url so a new/re-opened file re-triggers.
+  useEffect(() => {
+    if (!previewFile) return;
+    setTab("preview");
+    if (!open) onOpenChange?.(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewFile?.url]);
   const [width, setWidth] = useState<number>(DEFAULT_WIDTH);
   const [dragging, setDragging] = useState(false);
   const [fullWidth, setFullWidth] = useState(false);
-  const [bottomOpen, setBottomOpen] = useState(false);
   const dragState = useRef<{ startX: number; startWidth: number } | null>(null);
 
   const collapse = () => onOpenChange?.(false);
@@ -148,7 +177,9 @@ export function RightPanel({
     <aside
       aria-hidden={!open}
       className={cx(
-        "relative flex h-full flex-col overflow-hidden border-l bg-panel-bg",
+        // Same flat background as the chat area + left sidebar (--app-bg), only
+        // separated by the left border hairline.
+        "relative flex h-full flex-col overflow-hidden border-l bg-app-bg",
         // The border collapses with the panel so a hairline doesn't linger.
         open ? "border-panel-border" : "border-transparent",
         // Transition flex-basis (the collapse/expand width driver) + flex-grow
@@ -201,17 +232,23 @@ export function RightPanel({
         <TabListEmptyState
           onOpen={setTab}
           onCollapse={collapse}
-          onToggleBottom={() => setBottomOpen((v) => !v)}
+          bottomPanelOpen={bottomPanelOpen}
+          onToggleBottom={onToggleBottomPanel}
           onExpandFull={toggleFullWidth}
         />
       ) : (
         <>
           <PanelHeader
-            label={activeTab?.label ?? ""}
-            Icon={activeTab?.Icon ?? ReviewIcon}
+            label={
+              tab === "preview"
+                ? (previewFile?.name ?? "Preview")
+                : (activeTab?.label ?? "")
+            }
+            Icon={tab === "preview" ? FileIcon : (activeTab?.Icon ?? ReviewIcon)}
             onClose={() => setTab("none")}
             onCollapse={collapse}
-            onToggleBottom={() => setBottomOpen((v) => !v)}
+            bottomPanelOpen={bottomPanelOpen}
+            onToggleBottom={onToggleBottomPanel}
             onExpandFull={toggleFullWidth}
           />
           <div className="min-h-0 flex-1 overflow-y-auto">
@@ -231,6 +268,8 @@ export function RightPanel({
                 title="No files"
                 hint="Open a file to see it here."
               />
+            ) : tab === "preview" ? (
+              <PreviewTab file={previewFile} />
             ) : (
               <PlaceholderTab
                 Icon={SideChatTabIcon}
@@ -239,30 +278,6 @@ export function RightPanel({
               />
             )}
           </div>
-
-          {/* Bottom terminal panel, toggled from the header (⌘J). Opens in the
-              active session's directory. */}
-          {bottomOpen ? (
-            <div className="flex h-[240px] shrink-0 flex-col border-t border-panel-border">
-              <div className="flex h-9 shrink-0 items-center gap-2 border-b border-panel-border px-3">
-                <TerminalTabIcon width={16} height={16} className="icon-muted" />
-                <span className="text-[13px] font-medium leading-5 text-text-strong">
-                  Terminal
-                </span>
-                <Tooltip label="Close terminal" side="top">
-                  <button
-                    type="button"
-                    aria-label="Close terminal"
-                    onClick={() => setBottomOpen(false)}
-                    className="ml-auto flex size-6 items-center justify-center rounded-[8.4px] icon-muted transition-[opacity,background-color] duration-150 ease-out hover:bg-bubble-bg hover:opacity-100"
-                  >
-                    <XIcon width={14} height={14} />
-                  </button>
-                </Tooltip>
-              </div>
-              <TerminalPane cwd={cwd} compact />
-            </div>
-          ) : null}
         </>
       )}
       </div>
@@ -304,12 +319,14 @@ function TerminalPane({ cwd, compact }: { cwd?: string; compact?: boolean }) {
 function TabListEmptyState({
   onOpen,
   onCollapse,
+  bottomPanelOpen,
   onToggleBottom,
   onExpandFull,
 }: {
   onOpen: (id: TabId) => void;
   onCollapse: () => void;
-  onToggleBottom: () => void;
+  bottomPanelOpen?: boolean;
+  onToggleBottom?: () => void;
   onExpandFull: () => void;
 }) {
   return (
@@ -321,11 +338,7 @@ function TabListEmptyState({
             <ExpandFullIcon width={18} height={18} />
           </HeaderIconButton>
         </Tooltip>
-        <Tooltip label="Toggle bottom panel" shortcut="⌘J" side="bottom">
-          <HeaderIconButton label="Toggle bottom panel" onClick={onToggleBottom}>
-            <MinimizeIcon width={18} height={18} />
-          </HeaderIconButton>
-        </Tooltip>
+        <BottomPanelToggle open={bottomPanelOpen} onToggle={onToggleBottom} />
         <Tooltip label="Collapse panel" side="bottom">
           <HeaderIconButton label="Collapse panel" onClick={onCollapse}>
             <PanelRightOpenIcon width={18} height={18} />
@@ -372,6 +385,7 @@ function PanelHeader({
   Icon,
   onClose,
   onCollapse,
+  bottomPanelOpen,
   onToggleBottom,
   onExpandFull,
 }: {
@@ -379,7 +393,8 @@ function PanelHeader({
   Icon: (p: React.SVGProps<SVGSVGElement> & { size?: number }) => React.ReactElement;
   onClose: () => void;
   onCollapse: () => void;
-  onToggleBottom: () => void;
+  bottomPanelOpen?: boolean;
+  onToggleBottom?: () => void;
   onExpandFull: () => void;
 }) {
   return (
@@ -412,11 +427,7 @@ function PanelHeader({
             <ExpandFullIcon width={18} height={18} />
           </HeaderIconButton>
         </Tooltip>
-        <Tooltip label="Toggle bottom panel" shortcut="⌘J" side="bottom">
-          <HeaderIconButton label="Toggle bottom panel" onClick={onToggleBottom}>
-            <MinimizeIcon width={18} height={18} />
-          </HeaderIconButton>
-        </Tooltip>
+        <BottomPanelToggle open={bottomPanelOpen} onToggle={onToggleBottom} />
         <Tooltip label="Collapse panel" side="bottom">
           <HeaderIconButton label="Collapse panel" onClick={onCollapse}>
             <PanelRightOpenIcon width={18} height={18} />
@@ -424,6 +435,31 @@ function PanelHeader({
         </Tooltip>
       </div>
     </div>
+  );
+}
+
+/**
+ * The bottom-panel toggle header button. Shows the OPEN glyph (filled bar) when
+ * the bottom panel is showing, the CLOSED glyph (outline + line) otherwise, so
+ * its state is legible at a glance. Shared by both panel header variants.
+ */
+function BottomPanelToggle({
+  open,
+  onToggle,
+}: {
+  open?: boolean;
+  onToggle?: () => void;
+}) {
+  return (
+    <Tooltip label="Toggle bottom panel" shortcut="⌘J" side="bottom">
+      <HeaderIconButton label="Toggle bottom panel" onClick={onToggle}>
+        {open ? (
+          <BottomPanelOpenIcon width={18} height={18} />
+        ) : (
+          <BottomPanelClosedIcon width={18} height={18} />
+        )}
+      </HeaderIconButton>
+    </Tooltip>
   );
 }
 
@@ -551,6 +587,122 @@ function PlaceholderTab({
       <Icon width={24} height={24} className="icon-faint" />
       <p className="text-sm font-medium leading-5 text-text-secondary">{title}</p>
       <p className="text-center text-[12px] leading-4 text-text-faint">{hint}</p>
+    </div>
+  );
+}
+
+/**
+ * Preview of an opened attachment. Images render inline, PDFs in an embedded
+ * viewer, text files as decoded plaintext, and anything else falls back to a
+ * card with a download link. The file arrives as a data: URL from the composer.
+ */
+function PreviewTab({ file }: { file: PreviewFile | null }) {
+  const [text, setText] = useState<string | null>(null);
+
+  const isImage = file?.mime.startsWith("image/");
+  const isPdf =
+    file?.mime === "application/pdf" || /\.pdf$/i.test(file?.name ?? "");
+  const isText =
+    !!file &&
+    !isImage &&
+    !isPdf &&
+    (file.mime.startsWith("text/") ||
+      /\.(txt|md|markdown|json|ya?ml|csv|log|tsx?|jsx?|css|html?|xml|sh)$/i.test(
+        file.name,
+      ));
+
+  // Decode a text data: URL to a string for inline display.
+  useEffect(() => {
+    if (!file || !isText) {
+      setText(null);
+      return;
+    }
+    let cancelled = false;
+    fetch(file.url)
+      .then((r) => r.text())
+      .then((t) => {
+        if (!cancelled) setText(t);
+      })
+      .catch(() => {
+        if (!cancelled) setText(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [file, isText]);
+
+  if (!file) {
+    return (
+      <PlaceholderTab
+        Icon={FileIcon}
+        title="No preview"
+        hint="Open a file to see it here."
+      />
+    );
+  }
+
+  if (isImage) {
+    return (
+      <div className="flex h-full items-center justify-center bg-black/20 p-4">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={file.url}
+          alt={file.name}
+          className="max-h-full max-w-full rounded-lg object-contain"
+        />
+      </div>
+    );
+  }
+
+  if (isPdf) {
+    return (
+      <object
+        data={file.url}
+        type="application/pdf"
+        className="h-full w-full"
+        aria-label={file.name}
+      >
+        <div className="flex h-full flex-col items-center justify-center gap-3 px-6">
+          <FileIcon width={28} height={28} className="icon-faint" />
+          <p className="text-center text-[12px] leading-4 text-text-faint">
+            Can&apos;t display this PDF inline.
+          </p>
+          <a
+            href={file.url}
+            download={file.name}
+            className="rounded-full bg-btn-solid-bg px-3.5 py-1.5 text-[13px] font-semibold text-btn-solid-text"
+          >
+            Download
+          </a>
+        </div>
+      </object>
+    );
+  }
+
+  if (isText) {
+    return (
+      <pre className="h-full overflow-auto whitespace-pre-wrap break-words px-4 py-3 font-mono text-[12px] leading-5 text-text-primary">
+        {text ?? "Loading…"}
+      </pre>
+    );
+  }
+
+  // Fallback: generic file card with a download link.
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-3 px-6">
+      <span className="flex size-12 items-center justify-center rounded-xl bg-[#d64545] text-white">
+        <FileIcon width={24} height={24} />
+      </span>
+      <p className="text-center text-sm font-medium leading-5 text-text-strong">
+        {file.name}
+      </p>
+      <a
+        href={file.url}
+        download={file.name}
+        className="rounded-full bg-btn-solid-bg px-3.5 py-1.5 text-[13px] font-semibold text-btn-solid-text"
+      >
+        Download
+      </a>
     </div>
   );
 }

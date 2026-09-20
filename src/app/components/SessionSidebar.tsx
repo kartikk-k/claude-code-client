@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { ProjectSummary, SessionSummary } from "../lib/types";
 import {
@@ -18,11 +18,25 @@ import {
   CodePullRequestIcon,
   CodeMergeIcon,
   CodeForkIcon,
+  PinIcon,
+  ArchiveIcon,
+  LaptopIcon,
+  DotsIcon,
+  GearIcon,
+  ChatBubblePlusIcon,
+  FolderPointerIcon,
 } from "../chat/components/icons";
 import { UsageRing } from "./UsageRing";
 import { AccountMenu } from "./AccountMenu";
 import { SessionRowMenu } from "./SessionRowMenu";
 import { Tooltip } from "./ui/Tooltip";
+import { SidebarHoverCard, type HoverMetaRow } from "./SidebarHoverCard";
+
+/** Last path segment of a filesystem path, for cwd chips in hover cards. */
+function cwdBasename(path: string): string {
+  const parts = path.replace(/[/\\]+$/, "").split(/[/\\]/);
+  return parts[parts.length - 1] || path;
+}
 
 /** Human-friendly relative time from an epoch-ms timestamp. */
 export function relativeTime(ms: number): string {
@@ -143,19 +157,47 @@ function SectionHeading({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** Small round hover-action button shown on a row's right edge on hover. */
+function RowActionButton({
+  label,
+  onClick,
+  children,
+}: {
+  label: string;
+  onClick?: (e: React.MouseEvent) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick?.(e);
+      }}
+      className="flex size-6 items-center justify-center rounded-[7px] icon-muted transition-[opacity,background-color] duration-150 ease-out hover:bg-nav-active-bg hover:opacity-100"
+    >
+      {children}
+    </button>
+  );
+}
+
 /**
- * A flat session row (used by Pinned + Recents + project children). Shows the
- * title plus a `trailing` slot (e.g. relative time), a status-driven git glyph,
- * and a hover/right-click "…" context menu. The whole row is a `group` so the
- * menu button can fade in on hover; right-click forwards to the same menu.
+ * A flat session row (used by Pinned + Recents + project children). Hovering
+ * reveals pin + archive action buttons on the right (replacing the trailing
+ * meta), and — after a delay — a rich preview card (project / folder / branch).
+ * Right-click opens the full context menu.
  */
 function SessionRow({
   session,
+  project,
   active,
   trailing,
   onSelect,
 }: {
   session: SessionSummary;
+  /** Owning project, for the hover card's metadata (optional). */
+  project?: ProjectSummary;
   active: boolean;
   trailing?: React.ReactNode;
   onSelect: () => void;
@@ -168,12 +210,36 @@ function SessionRow({
     gitStatus === "open_pr" ||
     gitStatus === "forked";
 
-  return (
+  const cardRows: HoverMetaRow[] = [];
+  if (project) {
+    cardRows.push({
+      icon: <FolderIcon width={16} height={16} />,
+      text: project.name,
+    });
+    cardRows.push({
+      icon: <FolderPointerIcon width={16} height={16} />,
+      text: cwdBasename(session.cwd ?? project.path),
+      muted: true,
+    });
+  }
+  if (session.gitBranch) {
+    cardRows.push({
+      icon: (
+        <CodeForkIcon
+          width={16}
+          height={16}
+          className="text-[color:var(--agent-accent)]"
+        />
+      ),
+      text: session.gitBranch,
+      muted: true,
+    });
+  }
+
+  const row = (
     <div
       className="group relative flex items-center"
       onContextMenu={(e) => {
-        // Route native right-click to the same Base UI menu by clicking its
-        // "…" trigger, which anchors the popup to that button.
         e.preventDefault();
         moreRef.current?.click();
       }}
@@ -183,35 +249,49 @@ function SessionRow({
         onClick={onSelect}
         aria-current={active ? "page" : undefined}
         className={[
-          "flex h-8 w-full items-center gap-2 rounded-[11.2px] px-2 text-left transition-colors duration-150 ease-out",
+          "flex h-8 w-full items-center gap-2 overflow-hidden rounded-[11.2px] px-2 text-left transition-colors duration-150 ease-out",
           active
             ? "bg-nav-active-bg text-text-strong"
-            : "text-text-secondary hover:bg-nav-active-bg/60",
+            : "text-text-secondary hover:bg-nav-active-bg",
         ].join(" ")}
       >
+        {/* min-w-0 lets the title actually truncate instead of pushing under
+            the trailing icon. A right padding reserves space for the git glyph
+            so text and icon never overlap. */}
         <span
           className={[
-            "flex-1 truncate text-sm leading-5",
+            "min-w-0 flex-1 truncate text-sm leading-5",
             active ? "font-medium" : "",
+            showGitIcon ? "pr-1" : "",
           ].join(" ")}
         >
           {session.title}
         </span>
-        {/* Trailing meta (e.g. time) hides while the "…" affordance is shown. */}
         {trailing ? (
           <span className="shrink-0 group-hover:opacity-0 group-focus-within:opacity-0">
             {trailing}
           </span>
         ) : null}
         {showGitIcon ? (
-          <span className="shrink-0">
+          <span className="shrink-0 group-hover:opacity-0 group-focus-within:opacity-0">
             <GitStatusIcon status={gitStatus} />
           </span>
         ) : null}
       </button>
 
-      {/* Hover / right-click context menu, absolutely placed so it doesn't
-          shift the row layout when it appears. */}
+      {/* Hover action buttons: pin + archive. A solid background (matching the
+          hovered row) sits behind them so a long title is cleanly masked — no
+          overlap. */}
+      <span className="pointer-events-none absolute inset-y-0 right-0 flex items-center gap-0.5 rounded-r-[11.2px] bg-nav-active-bg pl-2 pr-1.5 opacity-0 transition-opacity duration-150 ease-out group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+        <RowActionButton label="Pin">
+          <PinIcon width={15} height={15} />
+        </RowActionButton>
+        <RowActionButton label="Archive">
+          <ArchiveIcon width={15} height={15} />
+        </RowActionButton>
+      </span>
+
+      {/* Full right-click context menu (hidden trigger anchored to the row). */}
       <span className="absolute right-1.5 top-1/2 -translate-y-1/2">
         <SessionRowMenu
           title={session.title}
@@ -221,6 +301,19 @@ function SessionRow({
         />
       </span>
     </div>
+  );
+
+  return (
+    <SidebarHoverCard
+      title={session.title}
+      titleIcon={<LaptopIcon width={16} height={16} />}
+      trailing={relativeTime(session.updatedAt)}
+      rows={cardRows}
+      divider={false}
+      side="right"
+    >
+      {row}
+    </SidebarHoverCard>
   );
 }
 
@@ -252,13 +345,13 @@ function ProjectGroup({
     : list;
   const overflow = hasOverflow ? list.slice(MAX_VISIBLE_SESSIONS) : [];
 
-  return (
-    <div className="flex flex-col">
+  const projectRow = (
+    <div className="group relative flex items-center">
       <button
         type="button"
         onClick={onToggle}
         aria-expanded={isExpanded}
-        className="flex h-8 w-full items-center gap-2 rounded-[11.2px] px-2 text-left text-text-secondary transition-colors duration-150 ease-out hover:bg-nav-active-bg/60"
+        className="flex h-8 w-full items-center gap-2 overflow-hidden rounded-[11.2px] px-2 text-left text-text-secondary transition-colors duration-150 ease-out hover:bg-nav-active-bg"
       >
         <span className="flex size-4 shrink-0 items-center justify-center">
           {/* One chevron that rotates — smooth, no glyph swap. */}
@@ -275,10 +368,53 @@ function ProjectGroup({
         ) : (
           <FolderIcon className="size-4 shrink-0 icon-muted" />
         )}
-        <span className="flex-1 truncate text-sm font-medium leading-5">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium leading-5">
           {project.name}
         </span>
       </button>
+
+      {/* Hover actions: ⋯ (more) + edit — with a gradient mask so a long name
+          truncates cleanly under the buttons (no overlap). */}
+      <span className="pointer-events-none absolute inset-y-0 right-0 flex items-center gap-0.5 rounded-r-[11.2px] pl-2 pr-1.5 opacity-0 transition-opacity duration-150 ease-out group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 bg-nav-active-bg">
+        <RowActionButton label="Project options">
+          <DotsIcon width={15} height={15} />
+        </RowActionButton>
+        <RowActionButton label="Edit project">
+          <EditIcon width={15} height={15} />
+        </RowActionButton>
+      </span>
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col">
+      <SidebarHoverCard
+        title={project.name}
+        rows={[
+          {
+            icon: <ChatBubblePlusIcon width={16} height={16} />,
+            text: `${project.sessionCount} ${
+              project.sessionCount === 1 ? "task" : "tasks"
+            }`,
+          },
+          {
+            icon: <FolderIcon width={16} height={16} />,
+            text: cwdBasename(project.path),
+          },
+          {
+            icon: <FolderIcon width={16} height={16} />,
+            text: project.path,
+            muted: true,
+          },
+        ]}
+        footer={{
+          icon: <GearIcon width={16} height={16} />,
+          label: "Edit project",
+        }}
+        side="right"
+      >
+        {projectRow}
+      </SidebarHoverCard>
 
       {/* Animated expand/collapse via grid-template-rows 0fr → 1fr. */}
       <div
@@ -305,6 +441,7 @@ function ProjectGroup({
                   <SessionRow
                     key={session.id}
                     session={session}
+                    project={project}
                     active={session.id === activeSessionId}
                     onSelect={() => onSelectSession(project.id, session.id)}
                   />
@@ -327,6 +464,7 @@ function ProjectGroup({
                             <SessionRow
                               key={session.id}
                               session={session}
+                              project={project}
                               active={session.id === activeSessionId}
                               onSelect={() =>
                                 onSelectSession(project.id, session.id)
@@ -397,6 +535,10 @@ export function SessionSidebar({
   usagePctLeft = 45,
 }: SessionSidebarProps) {
   const router = useRouter();
+  const projectById = useMemo(
+    () => Object.fromEntries(projects.map((p) => [p.id, p])),
+    [projects]
+  );
   return (
     <aside className="flex h-full w-[272px] shrink-0 flex-col border-r border-panel-border bg-app-bg">
       {/* Brand header */}
@@ -457,6 +599,7 @@ export function SessionSidebar({
                 <SessionRow
                   key={session.id}
                   session={session}
+                  project={projectById[session.projectId]}
                   active={session.id === activeSessionId}
                   onSelect={() =>
                     onSelectSession(session.projectId, session.id)
@@ -496,6 +639,7 @@ export function SessionSidebar({
                 <SessionRow
                   key={session.id}
                   session={session}
+                  project={projectById[session.projectId]}
                   active={session.id === activeSessionId}
                   onSelect={() =>
                     onSelectSession(session.projectId, session.id)

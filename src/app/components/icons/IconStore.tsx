@@ -651,6 +651,30 @@ export function SparkleGlyph({ size = 16, ...props }: GlyphProps) {
   );
 }
 
+/** A single clean 4-point sparkle (vs SparkleGlyph's cluttered cluster).
+ *  Used for the model pill so the toolbar reads cleanly. */
+export function SparkleSingleGlyph({ size = 16, ...props }: GlyphProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 18 18"
+      fill="currentColor"
+      aria-hidden="true"
+      {...props}
+    >
+      <path
+        d="M9 2.25L10.184 6.316L14.25 7.5L10.184 8.684L9 12.75L7.816 8.684L3.75 7.5L7.816 6.316L9 2.25Z"
+        fill="currentColor"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export function LinkGlyph({ size = 16, ...props }: GlyphProps) {
   return (
     <svg
@@ -1037,6 +1061,58 @@ export function ListReorderGlyph({ size = 16, ...props }: GlyphProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 18 18" fill="currentColor" aria-hidden="true" {...props}>
       <g fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" stroke="currentColor"><line x1="10.5" y1="5.25" x2="15.25" y2="5.25"></line><line x1="10.5" y1="12.75" x2="15.25" y2="12.75"></line><circle cx="5" cy="5" r="2.5"></circle><circle cx="5" cy="13" r="2.5"></circle></g>
+    </svg>
+  );
+}
+
+/** Bottom-panel toggle — CLOSED state: a panel outline with a divider line near
+ *  the bottom (the bottom panel is hidden). Provided by the user. */
+export function BottomPanelClosedGlyph({ size = 16, ...props }: GlyphProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" fill="currentColor" aria-hidden="true" {...props}>
+      <g fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" stroke="currentColor"><rect x="1.75" y="2.75" width="14.5" height="12.5" rx="2" ry="2" transform="translate(18 18) rotate(180)"></rect><line x1="4.75" y1="12.25" x2="13.25" y2="12.25"></line></g>
+    </svg>
+  );
+}
+
+/** Bottom-panel toggle — OPEN state: a panel outline with a filled bar at the
+ *  bottom (the bottom panel is showing). Provided by the user. */
+export function BottomPanelOpenGlyph({ size = 16, ...props }: GlyphProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" fill="currentColor" aria-hidden="true" {...props}>
+      <g fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" stroke="currentColor"><rect x="1.75" y="3.25" width="14.5" height="11.5" rx="2" ry="2"></rect><rect x="4.75" y="9.75" width="8.5" height="2" fill="currentColor"></rect></g>
+    </svg>
+  );
+}
+
+export function ArchiveGlyph({ size = 16, ...props }: GlyphProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" fill="currentColor" aria-hidden="true" {...props}>
+      <g fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" stroke="currentColor"><path d="M14.75,6.25v7c0,1.105-.895,2-2,2H5.25c-1.105,0-2-.895-2-2V6.25"></path><rect x="1.75" y="2.75" width="14.5" height="3.5" rx="1" ry="1"></rect><line x1="7" y1="9.25" x2="11" y2="9.25"></line></g>
+    </svg>
+  );
+}
+
+export function LaptopGlyph({ size = 16, ...props }: GlyphProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" fill="currentColor" aria-hidden="true" {...props}>
+      <g fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" stroke="currentColor"><path d="M4.25,14.75c-1.105,0-2-.895-2-2V4.75c0-1.105,.895-2,2-2H13.75c1.105,0,2,.895,2,2V12.75c0,1.105-.895,2-2,2"></path><line x1=".75" y1="14.75" x2="17.25" y2="14.75"></line></g>
+    </svg>
+  );
+}
+
+export function ChatBubblePlusGlyph({ size = 16, ...props }: GlyphProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" fill="currentColor" aria-hidden="true" {...props}>
+      <g fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" stroke="currentColor"><path d="M14.75 10.75V15.75"></path><path d="M17.25 13.25H12.25"></path><path d="M15.75 7.9272V4.75C15.75 3.646 14.855 2.75 13.75 2.75H4.25C3.145 2.75 2.25 3.646 2.25 4.75V16.25L6 13.25H9.25"></path></g>
+    </svg>
+  );
+}
+
+export function FolderPointerGlyph({ size = 16, ...props }: GlyphProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" fill="currentColor" aria-hidden="true" {...props}>
+      <g fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" stroke="currentColor"><path d="M2.25 8.75V4.75C2.25 3.645 3.145 2.75 4.25 2.75H6.201C6.808 2.75 7.381 3.02499 7.761 3.49799L8.364 4.25H13.75C14.855 4.25 15.75 5.145 15.75 6.25V9.09399"></path><path d="M15.75 9.2634V8.75C15.75 7.646 14.855 6.75 13.75 6.75H4.25C3.145 6.75 2.25 7.646 2.25 8.75V13.25C2.25 14.354 3.145 15.25 4.25 15.25H9.0793"></path><path d="M11.126 10.768L17.066 12.938C17.316 13.029 17.309 13.386 17.055 13.467L14.336 14.337L13.466 17.056C13.385 17.31 13.028 17.317 12.937 17.067L10.767 11.127C10.685 10.904 10.902 10.687 11.126 10.768Z"></path></g>
     </svg>
   );
 }
