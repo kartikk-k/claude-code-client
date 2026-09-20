@@ -50,8 +50,8 @@ export function Popover({
     <div
       role={role}
       className={[
-        "absolute z-50 rounded-[16.8px] border border-panel-border bg-panel-bg p-1.5",
-        "shadow-[0px_10px_30px_-5px_rgba(0,0,0,0.5)]",
+        "absolute z-50 rounded-[16.8px] border border-popover-border bg-popover-bg p-1.5",
+        "backdrop-blur-xl shadow-[0px_10px_30px_-5px_rgba(0,0,0,0.5)]",
         className,
       ].join(" ")}
       {...props}
@@ -94,11 +94,13 @@ export function MenuRow({
     : disabled
       ? "text-text-faint"
       : "text-text-strong";
+  // Icons dim via opacity (icon-* classes), never an alpha text color, so
+  // overlapping strokes don't double up.
   const iconColor = accent
     ? "text-[color:var(--agent-accent)]"
     : disabled
-      ? "text-text-faint"
-      : "text-text-secondary";
+      ? "icon-faint"
+      : "icon-muted";
 
   const titleEl = (
     <span
@@ -204,91 +206,12 @@ const activeCheck = (
   <CheckIcon width={16} height={16} className="text-text-strong" />
 );
 
-/* -------------------------------------------------------------------------- */
-/* 1) PermissionMenu                                                          */
-/* -------------------------------------------------------------------------- */
-
+/* The permission-mode value, shared with the Base UI PermissionMenu in
+ * ToolbarMenus.tsx (that dropdown replaced the old custom one here). */
 export type PermissionValue = "plan" | "acceptEdits" | "bypassPermissions";
 
-type PermissionOption = {
-  value: PermissionValue;
-  title: string;
-  description: string;
-  icon: React.ReactNode;
-  accent?: boolean;
-};
-
-const PERMISSION_OPTIONS: PermissionOption[] = [
-  {
-    value: "plan",
-    title: "Ask for approval",
-    description: "Always ask before edits and running commands",
-    icon: <ShieldIcon width={16} height={16} />,
-  },
-  {
-    value: "acceptEdits",
-    title: "Approve for me",
-    description: "Only ask for actions detected as potentially unsafe",
-    icon: <ShieldIcon width={16} height={16} />,
-  },
-  {
-    value: "bypassPermissions",
-    title: "Full access",
-    description: "Unrestricted access to files and commands",
-    icon: <AlertIcon width={16} height={16} />,
-    accent: true,
-  },
-];
-
-export function PermissionMenu({
-  value,
-  onChange,
-  onClose,
-  className = "",
-}: {
-  value: PermissionValue;
-  onChange: (value: PermissionValue) => void;
-  onClose: () => void;
-  className?: string;
-}) {
-  return (
-    <Popover className={["min-w-[320px]", className].join(" ")}>
-      <MenuHeading
-        right={
-          <a
-            href="#"
-            onClick={(e) => e.preventDefault()}
-            className="text-xs leading-4 text-link hover:underline"
-          >
-            Learn more
-          </a>
-        }
-      >
-        How should Claude be approved?
-      </MenuHeading>
-
-      {PERMISSION_OPTIONS.map((opt) => (
-        <MenuRow
-          key={opt.value}
-          icon={opt.icon}
-          title={opt.title}
-          description={opt.description}
-          descriptionAlign="below"
-          accent={opt.accent}
-          active={value === opt.value}
-          trailing={value === opt.value ? activeCheck : undefined}
-          onClick={() => {
-            onChange(opt.value);
-            onClose();
-          }}
-        />
-      ))}
-    </Popover>
-  );
-}
-
 /* -------------------------------------------------------------------------- */
-/* 2) SlashMenu                                                               */
+/* 1) SlashMenu                                                               */
 /* -------------------------------------------------------------------------- */
 
 export type SlashSkill = {
@@ -357,26 +280,46 @@ const DEFAULT_SKILLS: SlashSkill[] = [
   },
 ];
 
+/** Flat, ordered list of selectable slash items (actions then skills). The
+ *  composer drives arrow-key navigation over this exact order. */
+export function slashItems(skills: SlashSkill[] = DEFAULT_SKILLS): SlashItem[] {
+  return [
+    ...SLASH_ACTIONS.map(
+      (a): SlashItem => ({
+        kind: "action",
+        id: a.id,
+        title: a.title,
+        description: a.description,
+      })
+    ),
+    ...skills.map((skill): SlashItem => ({ kind: "skill", skill })),
+  ];
+}
+
 export function SlashMenu({
   onPick,
   onClose,
   skills = DEFAULT_SKILLS,
+  activeIndex = -1,
   className = "",
 }: {
   onPick: (item: SlashItem) => void;
   onClose: () => void;
   skills?: SlashSkill[];
+  /** Index into slashItems(skills) that is keyboard-highlighted. */
+  activeIndex?: number;
   className?: string;
 }) {
   return (
     <Popover className={["min-w-[360px]", className].join(" ")}>
-      {SLASH_ACTIONS.map((a) => (
+      {SLASH_ACTIONS.map((a, i) => (
         <MenuRow
           key={a.id}
           icon={a.icon}
           title={a.title}
           description={a.description}
           descriptionAlign="right"
+          active={i === activeIndex}
           onClick={() => {
             onPick({
               kind: "action",
@@ -390,13 +333,14 @@ export function SlashMenu({
       ))}
 
       <MenuHeading>Skills</MenuHeading>
-      {skills.map((skill) => (
+      {skills.map((skill, i) => (
         <MenuRow
           key={skill.name}
           icon={<SparkleIcon width={16} height={16} />}
           title={skill.name}
           description={skill.description}
           descriptionAlign="right"
+          active={SLASH_ACTIONS.length + i === activeIndex}
           trailing={skill.scope ? <ScopeTag label={skill.scope} /> : undefined}
           onClick={() => {
             onPick({ kind: "skill", skill });
@@ -441,27 +385,39 @@ function Highlight({ text, query }: { text: string; query: string }) {
   );
 }
 
+/** Files matching the mention query, in display order. The composer drives
+ *  arrow-key navigation over this exact filtered list. */
+export function mentionMatches(
+  query: string,
+  files: MentionFile[] = DEFAULT_FILES
+): MentionFile[] {
+  const q = query.trim().toLowerCase();
+  return q
+    ? files.filter(
+        (f) =>
+          f.name.toLowerCase().includes(q) ||
+          (f.path ? f.path.toLowerCase().includes(q) : false)
+      )
+    : files;
+}
+
 export function MentionMenu({
   query,
   files = DEFAULT_FILES,
   onPick,
   onClose,
+  activeIndex = -1,
   className = "",
 }: {
   query: string;
   files?: MentionFile[];
   onPick: (file: MentionFile) => void;
   onClose: () => void;
+  /** Index into mentionMatches(query, files) that is keyboard-highlighted. */
+  activeIndex?: number;
   className?: string;
 }) {
-  const q = query.trim().toLowerCase();
-  const filtered = q
-    ? files.filter(
-        (f) =>
-          f.name.toLowerCase().includes(q) ||
-          (f.path ? f.path.toLowerCase().includes(q) : false),
-      )
-    : files;
+  const filtered = mentionMatches(query, files);
 
   return (
     <Popover className={["min-w-[300px]", className].join(" ")}>
@@ -470,12 +426,13 @@ export function MentionMenu({
           No files found
         </div>
       ) : (
-        filtered.map((file) => (
+        filtered.map((file, i) => (
           <MenuRow
             key={`${file.path ?? ""}/${file.name}`}
             icon={<DocsIcon width={16} height={16} />}
             title={file.name}
             titleNode={<Highlight text={file.name} query={query} />}
+            active={i === activeIndex}
             trailing={
               file.path ? (
                 <span className="truncate text-xs leading-4 text-text-faint">
@@ -557,43 +514,69 @@ const DEFAULT_PLUGINS: AddPlugin[] = [
   },
 ];
 
+/** Flat, ordered list of *selectable* add items (enabled actions, then
+ *  plugins). Disabled actions are skipped so arrow-key nav lands only on
+ *  actionable rows. The composer drives navigation over this exact order. */
+export function addItems(plugins: AddPlugin[] = DEFAULT_PLUGINS): AddItem[] {
+  return [
+    ...ADD_ACTIONS.filter((a) => !a.disabled).map(
+      (a): AddItem => ({ kind: "action", id: a.id, title: a.title })
+    ),
+    ...plugins.map((plugin): AddItem => ({ kind: "plugin", plugin })),
+  ];
+}
+
 export function AddMenu({
   onPick,
   onClose,
   plugins = DEFAULT_PLUGINS,
+  activeIndex = -1,
   className = "",
 }: {
   onPick: (item: AddItem) => void;
   onClose: () => void;
   plugins?: AddPlugin[];
+  /** Index into addItems(plugins) that is keyboard-highlighted. */
+  activeIndex?: number;
   className?: string;
 }) {
+  // Map each rendered row to its index in the selectable addItems() list
+  // (disabled rows get -1 so they never highlight).
+  const enabledActions = ADD_ACTIONS.filter((a) => !a.disabled);
+  const selectableIndexOfAction = (id: string) =>
+    enabledActions.findIndex((a) => a.id === id);
+
   return (
     <Popover className={["min-w-[320px]", className].join(" ")}>
       <MenuHeading>Add</MenuHeading>
-      {ADD_ACTIONS.map((a) => (
-        <MenuRow
-          key={a.id}
-          icon={a.icon}
-          title={a.title}
-          description={a.description}
-          descriptionAlign="right"
-          disabled={a.disabled}
-          onClick={() => {
-            onPick({ kind: "action", id: a.id, title: a.title });
-            onClose();
-          }}
-        />
-      ))}
+      {ADD_ACTIONS.map((a) => {
+        const selIdx = a.disabled ? -1 : selectableIndexOfAction(a.id);
+        return (
+          <MenuRow
+            key={a.id}
+            icon={a.icon}
+            title={a.title}
+            description={a.description}
+            descriptionAlign="right"
+            disabled={a.disabled}
+            active={selIdx === activeIndex}
+            onClick={() => {
+              onPick({ kind: "action", id: a.id, title: a.title });
+              onClose();
+            }}
+          />
+        );
+      })}
 
       <MenuHeading>Plugins</MenuHeading>
-      {plugins.map((plugin) => (
+      {plugins.map((plugin, i) => (
         <MenuRow
           key={plugin.id}
           icon={plugin.icon ?? <SparkleIcon width={16} height={16} />}
           title={plugin.name}
           description={plugin.description}
           descriptionAlign="right"
+          active={enabledActions.length + i === activeIndex}
           onClick={() => {
             onPick({ kind: "plugin", plugin });
             onClose();

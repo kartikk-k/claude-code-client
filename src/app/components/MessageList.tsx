@@ -314,7 +314,12 @@ export function MessageList({
     <div className="mx-auto w-full max-w-[832px] px-8 py-4">
       {messages.map((m) => {
         if (m.role === "user") {
-          return <UserTurn key={m.uuid} message={m} />;
+          // `data-msg-id` anchors this turn for the table-of-contents rail.
+          return (
+            <div key={m.uuid} data-msg-id={m.uuid}>
+              <UserTurn message={m} />
+            </div>
+          );
         }
         return (
           <AssistantTurn

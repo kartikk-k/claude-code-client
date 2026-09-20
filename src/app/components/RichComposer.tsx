@@ -23,7 +23,7 @@
  * `text`, so the transcript stays plain-text while the UI stays rich.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   MicIcon,
   ArrowUpIcon,
@@ -32,20 +32,23 @@ import {
   SparkleIcon,
   ChevronDownIcon,
   XIcon,
-  CheckIcon,
+  FolderIcon,
+  GitBranchIcon,
 } from "../chat/components/icons";
 import {
-  Popover,
-  MenuRow,
-  PermissionMenu,
   SlashMenu,
   MentionMenu,
   AddMenu,
+  slashItems,
+  mentionMatches,
+  addItems,
   type PermissionValue,
   type SlashItem,
   type MentionFile,
   type AddItem,
 } from "./composer/Popovers";
+import { PermissionMenu, ModelMenu } from "./composer/ToolbarMenus";
+import { EffortMenu, type EffortLevel } from "./composer/EffortMenu";
 
 /* -------------------------------------------------------------------------- */
 /* Types + static config                                                      */
@@ -60,12 +63,20 @@ export type RichComposerProps = {
   }) => void;
   disabled?: boolean;
   cwd?: string;
+  /** Active session's git branch, if any — drives the branch chip. */
+  gitBranch?: string;
 };
 
-type Thumb = { id: string; url: string; name: string };
-type OpenMenu = "none" | "permission" | "model" | "slash" | "mention" | "add";
+/** Last path segment of a cwd, for the context-bar folder chip. */
+function cwdBasename(cwd: string): string {
+  const parts = cwd.replace(/[/\\]+$/, "").split(/[/\\]/);
+  return parts[parts.length - 1] || cwd;
+}
 
-const EFFORT_OPTIONS = ["High", "Medium", "Low"] as const;
+type Thumb = { id: string; url: string; name: string };
+// permission + model are owned by Base UI menus; only these live in local state.
+type OpenMenu = "none" | "slash" | "mention" | "add";
+
 
 type ModelOption = { id: string; label: string; sub: string };
 const MODEL_OPTIONS: ModelOption[] = [
@@ -148,77 +159,38 @@ function makePill(
 }
 
 /* -------------------------------------------------------------------------- */
-/* Local ModelMenu (built from the exported Popover primitives)               */
-/* -------------------------------------------------------------------------- */
-
-function ModelMenu({
-  value,
-  onChange,
-  onClose,
-  className = "",
-}: {
-  value: string;
-  onChange: (id: string) => void;
-  onClose: () => void;
-  className?: string;
-}) {
-  return (
-    <Popover className={["min-w-[240px]", className].join(" ")}>
-      {MODEL_OPTIONS.map((m) => (
-        <MenuRow
-          key={m.id}
-          icon={<SparkleIcon width={16} height={16} />}
-          title={m.label}
-          description={m.sub}
-          descriptionAlign="below"
-          active={m.id === value}
-          trailing={
-            m.id === value ? (
-              <CheckIcon width={16} height={16} className="text-text-strong" />
-            ) : undefined
-          }
-          onClick={() => {
-            onChange(m.id);
-            onClose();
-          }}
-        />
-      ))}
-    </Popover>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
 /* Toolbar pill                                                                */
 /* -------------------------------------------------------------------------- */
 
-function PillButton({
-  icon,
-  label,
-  chevron = true,
-  accent = false,
-  onClick,
-  ariaLabel,
-  ariaExpanded,
-}: {
-  icon?: React.ReactNode;
-  label?: string;
-  chevron?: boolean;
-  accent?: boolean;
-  onClick?: () => void;
-  ariaLabel?: string;
-  ariaExpanded?: boolean;
-}) {
+/**
+ * Toolbar pill. Forwards its ref and any extra props to the inner <button> so
+ * it can act as a Base UI `Menu.Trigger` (which injects onClick / aria / ref).
+ */
+const PillButton = React.forwardRef<
+  HTMLButtonElement,
+  {
+    icon?: React.ReactNode;
+    label?: string;
+    chevron?: boolean;
+    accent?: boolean;
+    ariaLabel?: string;
+  } & React.ButtonHTMLAttributes<HTMLButtonElement>
+>(function PillButton(
+  { icon, label, chevron = true, accent = false, ariaLabel, className, ...rest },
+  ref
+) {
   return (
     <button
+      ref={ref}
       type="button"
-      onClick={onClick}
       aria-label={ariaLabel}
       aria-haspopup="menu"
-      aria-expanded={ariaExpanded}
       className={[
         "flex h-7 items-center justify-center gap-1 rounded-full border-[0.556px] border-transparent px-2.5 transition-colors hover:bg-bubble-bg",
         accent ? "text-[color:var(--agent-accent)]" : "text-text-secondary",
+        className ?? "",
       ].join(" ")}
+      {...rest}
     >
       {icon}
       {label ? (
@@ -229,13 +201,18 @@ function PillButton({
       ) : null}
     </button>
   );
-}
+});
 
 /* -------------------------------------------------------------------------- */
 /* Component                                                                   */
 /* -------------------------------------------------------------------------- */
 
-export function RichComposer({ onSend, disabled = false, cwd }: RichComposerProps) {
+export function RichComposer({
+  onSend,
+  disabled = false,
+  cwd,
+  gitBranch,
+}: RichComposerProps) {
   const editorRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -245,11 +222,23 @@ export function RichComposer({ onSend, disabled = false, cwd }: RichComposerProp
   const [dragOver, setDragOver] = useState(false);
 
   const [model, setModel] = useState("sonnet");
-  const [effort, setEffort] = useState<(typeof EFFORT_OPTIONS)[number]>("High");
+  const [effort, setEffort] = useState<EffortLevel>("Medium");
   const [permission, setPermission] = useState<PermissionValue>("plan");
 
   const [menu, setMenu] = useState<OpenMenu>("none");
   const [mentionQuery, setMentionQuery] = useState("");
+  // Keyboard-highlighted row within the open typeahead menu (slash/mention/add).
+  const [activeIndex, setActiveIndex] = useState(0);
+
+  // The flat, ordered selectable items for whichever typeahead menu is open.
+  const typeaheadItems: (SlashItem | MentionFile | AddItem)[] =
+    menu === "slash"
+      ? slashItems()
+      : menu === "mention"
+        ? mentionMatches(mentionQuery)
+        : menu === "add"
+          ? addItems()
+          : [];
 
   const permPill = PERMISSION_PILL[permission];
   const modelLabel =
@@ -259,7 +248,14 @@ export function RichComposer({ onSend, disabled = false, cwd }: RichComposerProp
   const closeMenu = useCallback(() => {
     setMenu("none");
     setMentionQuery("");
+    setActiveIndex(0);
   }, []);
+
+  // Snap the highlight back to the first row whenever the open menu changes or
+  // the mention query reflows the filtered list.
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [menu, mentionQuery]);
 
   // Outside-click + Escape dismiss any open menu (the popovers themselves are
   // presentational and don't self-manage dismissal).
@@ -460,16 +456,6 @@ export function RichComposer({ onSend, disabled = false, cwd }: RichComposerProp
     closeMenu();
   }, [canSend, images, model, permission, onSend, closeMenu]);
 
-  const onKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLDivElement>) => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        doSend();
-      }
-    },
-    [doSend]
-  );
-
   /* --------------------------- menu selections --------------------------- */
 
   const onSlashPick = useCallback(
@@ -517,12 +503,98 @@ export function RichComposer({ onSend, disabled = false, cwd }: RichComposerProp
     []
   );
 
+  /** Commit the currently-highlighted item of the open typeahead menu. */
+  const pickActiveTypeahead = useCallback(() => {
+    const item = typeaheadItems[activeIndex];
+    if (!item) return;
+    if (menu === "slash") onSlashPick(item as SlashItem);
+    else if (menu === "mention") onMentionPick(item as MentionFile);
+    else if (menu === "add") onAddPick(item as AddItem);
+  }, [
+    menu,
+    activeIndex,
+    typeaheadItems,
+    onSlashPick,
+    onMentionPick,
+    onAddPick,
+  ]);
+
+  const onKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      const typeaheadOpen =
+        menu === "slash" || menu === "mention" || menu === "add";
+
+      // While a typeahead menu is open, arrows/enter/escape drive the menu
+      // (not the editor). Focus stays in the contentEditable so typing keeps
+      // filtering the list.
+      if (typeaheadOpen && typeaheadItems.length > 0) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          setActiveIndex((i) => (i + 1) % typeaheadItems.length);
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setActiveIndex(
+            (i) => (i - 1 + typeaheadItems.length) % typeaheadItems.length
+          );
+          return;
+        }
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          pickActiveTypeahead();
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          closeMenu();
+          return;
+        }
+      }
+
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        doSend();
+      }
+    },
+    [menu, typeaheadItems, pickActiveTypeahead, closeMenu, doSend]
+  );
+
   const placeholderVisible = !hasText && images.length === 0;
+
+  const folderName = cwd ? cwdBasename(cwd) : null;
+  // The context bar only makes sense once a session (cwd) is active.
+  const showContextBar = Boolean(folderName);
 
   return (
     <div ref={rootRef} className="shrink-0 pb-2.5">
       <div className="mx-auto w-full max-w-[896px] px-8">
         <div className="w-full">
+          {/* Context bar — folder + optional branch, tucked above the input.
+              "Local" is implied (it's always local) so it isn't shown. */}
+          {showContextBar ? (
+            <div className="flex items-center gap-4 px-3 pb-2.5 text-text-secondary">
+              <span className="flex min-w-0 items-center gap-1.5">
+                <FolderIcon width={16} height={16} className="shrink-0 icon-muted" />
+                <span className="truncate text-sm font-medium leading-5">
+                  {folderName}
+                </span>
+              </span>
+              {gitBranch ? (
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <GitBranchIcon
+                    width={16}
+                    height={16}
+                    className="shrink-0 icon-muted"
+                  />
+                  <span className="truncate text-sm font-medium leading-5">
+                    {gitBranch}
+                  </span>
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+
           {/* Input surface */}
           <div
             onDragOver={(e) => {
@@ -577,7 +649,7 @@ export function RichComposer({ onSend, disabled = false, cwd }: RichComposerProp
                   aria-hidden
                   className="pointer-events-none absolute left-[42px] top-2 text-sm leading-[22.75px] text-text-secondary"
                 >
-                  Reply to Claude…
+                  Do anything
                 </span>
               ) : null}
               <div
@@ -592,7 +664,7 @@ export function RichComposer({ onSend, disabled = false, cwd }: RichComposerProp
                 onKeyUp={detectTriggers}
                 onPaste={onPaste}
                 onClick={onEditorClick}
-                className="max-h-[357px] min-h-[38.7px] w-full overflow-y-auto whitespace-pre-wrap break-words px-[42px] py-2 text-sm leading-[22.75px] text-text-strong outline-none [word-break:break-word]"
+                className="max-h-[357px] min-h-[88px] w-full overflow-y-auto whitespace-pre-wrap break-words px-[42px] py-2 text-sm leading-[22.75px] text-text-strong outline-none [word-break:break-word]"
               />
             </div>
 
@@ -604,7 +676,7 @@ export function RichComposer({ onSend, disabled = false, cwd }: RichComposerProp
                 aria-haspopup="menu"
                 aria-expanded={menu === "add"}
                 onClick={() => toggle("add")}
-                className="flex size-7 items-center justify-center rounded-full border-[0.556px] border-transparent bg-bubble-bg text-text-secondary transition-colors hover:text-text-strong"
+                className="flex size-7 items-center justify-center rounded-full border-[0.556px] border-transparent bg-bubble-bg icon-muted transition-opacity hover:opacity-100"
               >
                 <PlusCircleIcon width={16} height={16} />
               </button>
@@ -612,6 +684,7 @@ export function RichComposer({ onSend, disabled = false, cwd }: RichComposerProp
                 <AddMenu
                   onPick={onAddPick}
                   onClose={closeMenu}
+                  activeIndex={activeIndex}
                   className="bottom-9 left-0"
                 />
               ) : null}
@@ -622,7 +695,7 @@ export function RichComposer({ onSend, disabled = false, cwd }: RichComposerProp
               <button
                 type="button"
                 aria-label="Dictate"
-                className="flex size-7 items-center justify-center rounded-full border-[0.556px] border-transparent text-text-secondary transition-colors hover:bg-bubble-bg hover:text-text-strong"
+                className="flex size-7 items-center justify-center rounded-full border-[0.556px] border-transparent icon-muted transition-[opacity,background-color] hover:bg-bubble-bg hover:opacity-100"
               >
                 <MicIcon />
               </button>
@@ -645,6 +718,7 @@ export function RichComposer({ onSend, disabled = false, cwd }: RichComposerProp
               <SlashMenu
                 onPick={onSlashPick}
                 onClose={closeMenu}
+                activeIndex={activeIndex}
                 className="bottom-full left-[42px] mb-2"
               />
             ) : null}
@@ -653,6 +727,7 @@ export function RichComposer({ onSend, disabled = false, cwd }: RichComposerProp
                 query={mentionQuery}
                 onPick={onMentionPick}
                 onClose={closeMenu}
+                activeIndex={activeIndex}
                 className="bottom-full left-[42px] mb-2"
               />
             ) : null}
@@ -660,58 +735,49 @@ export function RichComposer({ onSend, disabled = false, cwd }: RichComposerProp
 
           {/* Toolbar */}
           <div className="flex items-center py-1">
-            <div className="relative flex flex-1 items-center">
-              <PillButton
-                icon={
-                  permission === "bypassPermissions" ? (
-                    <SparkleIcon width={14} height={14} />
-                  ) : (
-                    <ShieldIcon width={14} height={14} />
-                  )
+            <div className="flex flex-1 items-center">
+              <PermissionMenu
+                value={permission}
+                onChange={setPermission}
+                trigger={
+                  <PillButton
+                    icon={
+                      permission === "bypassPermissions" ? (
+                        <SparkleIcon width={14} height={14} />
+                      ) : (
+                        <ShieldIcon width={14} height={14} />
+                      )
+                    }
+                    label={permPill.label}
+                    accent={permPill.accent}
+                    ariaLabel="Permission mode"
+                  />
                 }
-                label={permPill.label}
-                accent={permPill.accent}
-                ariaLabel="Permission mode"
-                ariaExpanded={menu === "permission"}
-                onClick={() => toggle("permission")}
               />
-              {menu === "permission" ? (
-                <PermissionMenu
-                  value={permission}
-                  onChange={setPermission}
-                  onClose={closeMenu}
-                  className="bottom-full left-0 mb-2"
-                />
-              ) : null}
             </div>
 
             <div className="flex items-center">
-              <div className="relative flex items-center">
-                <PillButton
-                  icon={<SparkleIcon width={14} height={14} />}
-                  label={modelLabel}
-                  ariaLabel="Model"
-                  ariaExpanded={menu === "model"}
-                  onClick={() => toggle("model")}
-                />
-                {menu === "model" ? (
-                  <ModelMenu
-                    value={model}
-                    onChange={setModel}
-                    onClose={closeMenu}
-                    className="bottom-full right-0 mb-2"
+              <ModelMenu
+                value={model}
+                options={MODEL_OPTIONS}
+                onChange={setModel}
+                trigger={
+                  <PillButton
+                    icon={<SparkleIcon width={14} height={14} />}
+                    label={modelLabel}
+                    ariaLabel="Model"
                   />
-                ) : null}
-              </div>
-              <PillButton
-                chevron={false}
-                label={effort}
-                ariaLabel="Reasoning effort"
-                onClick={() =>
-                  setEffort((cur) => {
-                    const idx = EFFORT_OPTIONS.indexOf(cur);
-                    return EFFORT_OPTIONS[(idx + 1) % EFFORT_OPTIONS.length];
-                  })
+                }
+              />
+              <EffortMenu
+                value={effort}
+                modelLabel={modelLabel}
+                onChange={setEffort}
+                trigger={
+                  <PillButton
+                    label={effort ? effort : "Select effort"}
+                    ariaLabel="Reasoning effort"
+                  />
                 }
               />
             </div>

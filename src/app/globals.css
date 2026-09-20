@@ -14,6 +14,10 @@
   --panel-bg: #f8f8f8;
   --panel-border: rgba(10, 10, 10, 0.1);
   --row-bg: #ffffff;
+  /* Floating popover/dropdown surface: light gray at 70% opacity for a
+     visible backdrop blur, with a soft border so it reads as raised. */
+  --popover-bg: rgba(245, 245, 245, 0.7);
+  --popover-border: rgba(10, 10, 10, 0.08);
   /* light: card has a visible outer border + a hairline divider between rows */
   --card-border: rgba(10, 10, 10, 0.1);
   --row-divider: rgba(10, 10, 10, 0.1);
@@ -40,6 +44,11 @@
   --switch-on: #00bc7d;
   --switch-knob: #ffffff;
 
+  /* Brand primary — blue. Used for interactive highlights (resize handle,
+     focus rings, selected accents). Distinct from --agent-accent (purple),
+     which stays reserved for agent/sub-agent semantics. */
+  --primary: #3c9eff;
+
   --rail-dot: #0a0a0a;
 
   /* claude-client: code + tool cards (light) */
@@ -60,13 +69,17 @@
   --panel-bg: rgba(23, 23, 23, 0.8);
   --panel-border: rgba(250, 250, 250, 0.1);
   --row-bg: rgba(250, 250, 250, 0.06);
+  /* Floating popover/dropdown surface: lighter gray than the app bg so it
+     reads as raised, at 70% opacity for a visible backdrop blur. */
+  --popover-bg: rgba(47 47 47 / 0.7);
+  --popover-border: rgba(250, 250, 250, 0.12);
   /* dark: card has no visible outer border; the row divider matches the
      content-area bg so the 1px border between rows reads as a gap. */
   --card-border: transparent;
   --row-divider: #181818;
   --control-bg: rgba(250, 250, 250, 0.03);
   --control-border: rgba(250, 250, 250, 0.1);
-  --nav-active-bg: rgba(250, 250, 250, 0.15);
+  --nav-active-bg: rgba(250, 250, 250, 0.08);
 
   /* chat page */
   --bubble-bg: rgba(250, 250, 250, 0.08);
@@ -87,6 +100,9 @@
   --switch-on: #00bc7d;
   --switch-knob: #ffffff;
 
+  /* Brand primary — blue (same hue both themes; it reads well on dark). */
+  --primary: #3c9eff;
+
   --rail-dot: #fafafa;
 
   /* claude-client: code + tool cards (dark) — GitHub-dark palette from Figma */
@@ -106,6 +122,8 @@
   --color-app-bg: var(--app-bg);
   --color-panel-bg: var(--panel-bg);
   --color-panel-border: var(--panel-border);
+  --color-popover-bg: var(--popover-bg);
+  --color-popover-border: var(--popover-border);
   --color-row-bg: var(--row-bg);
   --color-card-border: var(--card-border);
   --color-row-divider: var(--row-divider);
@@ -126,12 +144,79 @@
   --color-btn-solid-text: var(--btn-solid-text);
 
   --color-link: var(--link);
+  --color-primary: var(--primary);
   --color-switch-on: var(--switch-on);
   --color-switch-knob: var(--switch-knob);
   --color-rail-dot: var(--rail-dot);
 
   --font-sans: var(--font-geist);
   --font-display: var(--font-display);
+
+  /* Shared easing curves (Emil Kowalski's blueprint). Enter/exit → ease-out;
+     on-screen movement → ease-in-out; hover/color → plain ease. Exposed as
+     Tailwind `ease-*` utilities, e.g. `ease-out-quart`. */
+  --ease-out-quad: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --ease-out-cubic: cubic-bezier(0.215, 0.61, 0.355, 1);
+  --ease-out-quart: cubic-bezier(0.165, 0.84, 0.44, 1);
+  --ease-out-expo: cubic-bezier(0.19, 1, 0.22, 1);
+  --ease-in-out-quart: cubic-bezier(0.77, 0, 0.175, 1);
+}
+
+/* Shared entrance keyframes (opacity + small upward slide). Used by cards/pills
+   that mount into the transcript, e.g. the PR card. */
+@keyframes prcard-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/*
+ * Icon dimming. Stroke-based (outline) icons fill with `currentColor`; if that
+ * color carries alpha (like our --text-secondary / --text-faint tokens), the
+ * places where strokes overlap double the alpha and show seams. So icons must
+ * render at a SOLID color and be dimmed with element `opacity` instead. These
+ * utilities do exactly that — use them on icons instead of text-* alpha tokens.
+ */
+.icon-strong {
+  color: var(--text-strong);
+  opacity: 1;
+}
+.icon-muted {
+  color: var(--text-strong);
+  opacity: 0.6;
+}
+.icon-faint {
+  color: var(--text-strong);
+  opacity: 0.4;
+}
+
+/*
+ * Icons never shrink. Inline <svg> glyphs are flex items in most of our rows
+ * (nav rows, buttons, list items); when the row runs out of room, flexbox would
+ * otherwise shrink the SVG and squish the icon. Force every inline SVG to keep
+ * its intrinsic size. A width/height is always set on our glyphs, so this only
+ * removes the unwanted shrink — it never changes an icon's chosen size.
+ */
+svg {
+  flex-shrink: 0;
+}
+
+/* Respect reduced-motion globally: kill transitions/animations for users who
+   ask for it, without needing a per-component query. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 html {
