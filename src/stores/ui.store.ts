@@ -42,6 +42,9 @@ export type OpenTab = {
   url?: string;
 };
 
+/** One open terminal in the bottom panel (stable id → persistent PTY session). */
+export type BottomTerm = { id: string };
+
 /** Everything a single chat remembers about its workspace. */
 export type ChatLayout = {
   rightWidth: number;
@@ -52,6 +55,9 @@ export type ChatLayout = {
   /** The active tab's id, or null when the empty tab-list state is shown. */
   activeTabId: string | null;
   bottomHeight: number;
+  /** Open bottom-panel terminals (multi-tab). Stable ids keep PTYs alive. */
+  bottomTerminals: BottomTerm[];
+  bottomActiveId: string | null;
   draft: string;
   attachments: DraftAttachment[];
 };
@@ -63,12 +69,20 @@ export const BOTTOM_MIN_HEIGHT = 140;
 export const BOTTOM_MAX_HEIGHT = 560;
 export const BOTTOM_DEFAULT_HEIGHT = 260;
 
+// Left sidebar width — adjustable like the right panel, but capped a bit
+// narrower (it holds a fixed nav + session list, so it needs less room).
+export const LEFT_MIN_WIDTH = 220;
+export const LEFT_MAX_WIDTH = 400;
+export const LEFT_DEFAULT_WIDTH = 272;
+
 export const DEFAULT_CHAT_LAYOUT: ChatLayout = {
   rightWidth: RIGHT_DEFAULT_WIDTH,
   rightTab: "none",
   openTabs: [],
   activeTabId: null,
   bottomHeight: BOTTOM_DEFAULT_HEIGHT,
+  bottomTerminals: [],
+  bottomActiveId: null,
   draft: "",
   attachments: [],
 };
@@ -78,6 +92,8 @@ export const NO_CHAT_KEY = "__none__";
 
 type UiState = {
   sidebarCollapsed: boolean;
+  /** Left sidebar width (px) — adjustable, persisted globally. */
+  sidebarWidth: number;
   rightPanelOpen: boolean;
   rightPanelFull: boolean;
   bottomPanelOpen: boolean;
@@ -89,6 +105,7 @@ type UiState = {
   // --- global chrome actions ---
   toggleSidebar: () => void;
   setSidebarCollapsed: (v: boolean) => void;
+  setSidebarWidth: (w: number) => void;
   toggleRightPanel: () => void;
   setRightPanelOpen: (v: boolean) => void;
   setRightPanelFull: (v: boolean) => void;
@@ -112,6 +129,7 @@ export const useUiStore = create<UiState>()(
   persist(
     (set, get) => ({
       sidebarCollapsed: false,
+      sidebarWidth: LEFT_DEFAULT_WIDTH,
       rightPanelOpen: true,
       rightPanelFull: false,
       bottomPanelOpen: false,
@@ -121,6 +139,8 @@ export const useUiStore = create<UiState>()(
       toggleSidebar: () =>
         set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
       setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
+      setSidebarWidth: (w) =>
+        set({ sidebarWidth: clamp(w, LEFT_MIN_WIDTH, LEFT_MAX_WIDTH) }),
       toggleRightPanel: () =>
         set((s) => ({
           rightPanelOpen: !s.rightPanelOpen,
@@ -145,6 +165,11 @@ export const useUiStore = create<UiState>()(
 
       getLayout: (sessionId) => {
         const key = sessionId || NO_CHAT_KEY;
+        // Return the STABLE stored reference (or the shared default) — never a
+        // freshly-built object, or Zustand's snapshot cache would see a new
+        // value every render and loop. Older layouts are normalized to include
+        // all fields by the persist `migrate` step (v2 → v3), so reads here can
+        // stay pure.
         return get().chatLayout[key] ?? DEFAULT_CHAT_LAYOUT;
       },
       patchLayout: (sessionId, patch) => {
@@ -169,33 +194,40 @@ export const useUiStore = create<UiState>()(
     }),
     {
       name: "claude-client:ui",
-      version: 2,
-      // v1 → v2: introduce the multi-tab model. Old layouts stored a single
-      // `rightTab`; seed `openTabs`/`activeTabId` from it (a non-"none" tab
-      // becomes one open tab) so existing localStorage upgrades without a crash.
+      version: 3,
+      // Normalize persisted layouts so every read returns a fully-populated,
+      // stable object (a partial layout would force getLayout to rebuild it,
+      // which breaks Zustand's snapshot caching).
+      //   v1 → v2: single `rightTab` → the multi-tab `openTabs`/`activeTabId`.
+      //   v2 → v3: backfill `bottomTerminals`/`bottomActiveId` (+ any new field).
       migrate: (persisted, version) => {
-        const state = persisted as { chatLayout?: Record<string, ChatLayout> };
-        if (!state || typeof state !== "object" || !state.chatLayout) {
-          return persisted as UiState;
-        }
-        if (version < 2) {
+        const state = persisted as {
+          chatLayout?: Record<string, ChatLayout>;
+          sidebarWidth?: number;
+        };
+        if (!state || typeof state !== "object") return persisted as UiState;
+        if (state.chatLayout) {
           const migrated: Record<string, ChatLayout> = {};
           for (const [key, raw] of Object.entries(state.chatLayout)) {
             const layout = raw as Partial<ChatLayout> & { rightTab?: RightTab };
-            if (Array.isArray(layout.openTabs)) {
-              migrated[key] = layout as ChatLayout;
-              continue;
+            let openTabs = Array.isArray(layout.openTabs)
+              ? layout.openTabs
+              : undefined;
+            let activeTabId = layout.activeTabId;
+            if (!openTabs && version < 2) {
+              const prevTab = layout.rightTab ?? "none";
+              openTabs =
+                prevTab && prevTab !== "none" && prevTab !== "preview"
+                  ? [{ id: `${prevTab}-migrated`, kind: prevTab }]
+                  : [];
+              activeTabId = openTabs[0]?.id ?? null;
             }
-            const prevTab = layout.rightTab ?? "none";
-            const openTabs: OpenTab[] =
-              prevTab && prevTab !== "none" && prevTab !== "preview"
-                ? [{ id: `${prevTab}-migrated`, kind: prevTab }]
-                : [];
+            // Fill every field from defaults so the shape is always complete.
             migrated[key] = {
               ...DEFAULT_CHAT_LAYOUT,
               ...layout,
-              openTabs,
-              activeTabId: openTabs[0]?.id ?? null,
+              openTabs: openTabs ?? DEFAULT_CHAT_LAYOUT.openTabs,
+              activeTabId: activeTabId ?? null,
             };
           }
           state.chatLayout = migrated;

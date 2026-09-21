@@ -15,9 +15,13 @@ import { useEffect, useRef } from "react";
 import { SERVER_URL } from "../lib/api";
 
 export function TerminalView({
+  termId,
   cwd,
   className = "",
 }: {
+  /** Stable terminal id — the server keeps this shell session alive across
+   *  reconnects (route change, panel toggle), so it resumes instead of respawning. */
+  termId: string;
   /** Working directory the shell opens in. */
   cwd?: string;
   className?: string;
@@ -80,9 +84,11 @@ export function TerminalView({
       });
       ro.observe(host);
 
-      // --- WebSocket to the server shell ---
+      // --- WebSocket to the server shell (reattaches to `termId`'s session) ---
       const wsBase = SERVER_URL.replace(/^http/, "ws");
-      const url = `${wsBase}/api/pty?cwd=${encodeURIComponent(cwd ?? "")}`;
+      const url =
+        `${wsBase}/api/pty?id=${encodeURIComponent(termId)}` +
+        `&cwd=${encodeURIComponent(cwd ?? "")}`;
       const ws = new WebSocket(url);
       let open = false;
       ws.onopen = () => {
@@ -144,7 +150,10 @@ export function TerminalView({
       disposed = true;
       cleanup();
     };
-  }, [cwd]);
+    // Re-run only when the terminal identity changes. cwd is captured at spawn
+    // time on the server; the persistent session ignores later cwd changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [termId]);
 
   return (
     <div

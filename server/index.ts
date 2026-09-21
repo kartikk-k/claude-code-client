@@ -168,10 +168,11 @@ app.get(
       // Degrade gracefully: refuse the socket, keep the server alive.
       return { onOpen: (_e, ws) => ws.close(1011, "pty unavailable") };
     }
+    const id = c.req.query("id") ?? crypto.randomUUID();
     const cwd = c.req.query("cwd") ?? "";
     const cols = Number(c.req.query("cols")) || 80;
     const rows = Number(c.req.query("rows")) || 24;
-    return ptyEvents(cwd, cols, rows);
+    return ptyEvents(id, cwd, cols, rows);
   })
 );
 

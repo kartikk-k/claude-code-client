@@ -609,7 +609,7 @@ export function SessionSidebar({
     [projects]
   );
   return (
-    <aside className="flex h-full w-[272px] shrink-0 flex-col border-r border-panel-border bg-app-bg">
+    <aside className="flex h-full w-full shrink-0 flex-col border-r border-panel-border bg-app-bg">
       {/* Brand header */}
       <div className="flex h-11 shrink-0 items-center px-3">
         <span className="px-1 text-sm font-medium leading-5 text-text-strong">
@@ -650,7 +650,11 @@ export function SessionSidebar({
               <PlusCircleIcon className="size-4 icon-muted" />
             }
           />
-          <NavRow icon={CodePullRequestIcon} label="Pull requests" />
+          <NavRow
+            icon={CodePullRequestIcon}
+            label="Pull requests"
+            onClick={() => router.push("/pull-requests")}
+          />
           <NavRow icon={ClockIcon} label="Scheduled" />
           <NavRow
             icon={PluginsIcon}

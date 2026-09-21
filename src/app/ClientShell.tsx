@@ -8,6 +8,8 @@ import {
   useUiStore,
   useActiveTranscript,
   useStreaming,
+  LEFT_MIN_WIDTH,
+  LEFT_MAX_WIDTH,
 } from "@/stores";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { MessageList } from "./components/MessageList";
@@ -87,6 +89,8 @@ export function ClientShell() {
 
   // --- global chrome (ui store) ---
   const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed);
+  const sidebarWidth = useUiStore((s) => s.sidebarWidth);
+  const setSidebarWidth = useUiStore((s) => s.setSidebarWidth);
   const rightPanelOpen = useUiStore((s) => s.rightPanelOpen);
   const rightPanelFull = useUiStore((s) => s.rightPanelFull);
   const bottomPanelOpen = useUiStore((s) => s.bottomPanelOpen);
@@ -106,6 +110,39 @@ export function ClientShell() {
     mime: string;
   } | null>(null);
   const sending = streaming?.active ?? false;
+
+  // Left sidebar drag-resize. The committed width lives in the store; only the
+  // in-progress drag state is local. Clamped to [LEFT_MIN, LEFT_MAX].
+  const [sidebarDragging, setSidebarDragging] = useState(false);
+  const sidebarDrag = useRef<{ startX: number; startWidth: number } | null>(
+    null,
+  );
+  const onSidebarPointerMove = useCallback(
+    (e: PointerEvent) => {
+      const s = sidebarDrag.current;
+      if (!s) return;
+      // Handle is on the RIGHT edge: dragging right widens.
+      const w = s.startWidth + (e.clientX - s.startX);
+      setSidebarWidth(Math.min(LEFT_MAX_WIDTH, Math.max(LEFT_MIN_WIDTH, w)));
+    },
+    [setSidebarWidth],
+  );
+  const onSidebarPointerUp = useCallback(() => {
+    sidebarDrag.current = null;
+    setSidebarDragging(false);
+    window.removeEventListener("pointermove", onSidebarPointerMove);
+    window.removeEventListener("pointerup", onSidebarPointerUp);
+  }, [onSidebarPointerMove]);
+  const onSidebarHandleDown = useCallback(
+    (e: React.PointerEvent) => {
+      e.preventDefault();
+      sidebarDrag.current = { startX: e.clientX, startWidth: sidebarWidth };
+      setSidebarDragging(true);
+      window.addEventListener("pointermove", onSidebarPointerMove);
+      window.addEventListener("pointerup", onSidebarPointerUp);
+    },
+    [sidebarWidth, onSidebarPointerMove, onSidebarPointerUp],
+  );
 
   // Transcript scroll container — observed by the table-of-contents rail.
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -250,15 +287,20 @@ export function ClientShell() {
     <div className="flex h-dvh w-full overflow-hidden bg-app-bg text-text-strong">
       {/* Left sidebar. Kept mounted and animated (width → 0) on ⌘B so it slides
           out instead of vanishing; the inner width is pinned so its contents
-          don't reflow mid-animation. */}
+          don't reflow mid-animation. Width is adjustable via the right-edge
+          handle and persisted in the store. */}
       <div
         aria-hidden={sidebarCollapsed}
-        className="h-full shrink-0 overflow-hidden transition-[width] duration-300 ease-[var(--ease-out-quart)]"
+        className="relative h-full shrink-0 overflow-hidden"
         style={{
-          width: sidebarCollapsed ? 0 : 272,
+          width: sidebarCollapsed ? 0 : sidebarWidth,
           pointerEvents: sidebarCollapsed ? "none" : undefined,
+          transition: sidebarDragging
+            ? "none"
+            : "width 300ms var(--ease-out-quart)",
         }}
       >
+        <div style={{ width: sidebarWidth }} className="h-full">
         <SessionSidebar
           projects={projects}
           sessionsByProject={sessionsByProject}
@@ -278,6 +320,26 @@ export function ClientShell() {
           }}
           usagePctLeft={45}
         />
+        </div>
+
+        {/* Right-edge resize handle — drag to adjust the sidebar width. */}
+        {!sidebarCollapsed ? (
+          <button
+            type="button"
+            aria-label="Resize sidebar"
+            onPointerDown={onSidebarHandleDown}
+            className="group absolute inset-y-0 right-0 z-10 flex w-2 cursor-col-resize touch-none items-center justify-center focus:outline-none"
+          >
+            <span
+              className={
+                "h-full w-px transition-colors duration-150 ease-out " +
+                (sidebarDragging
+                  ? "bg-[var(--primary)]"
+                  : "bg-transparent group-hover:bg-[var(--primary)]")
+              }
+            />
+          </button>
+        ) : null}
       </div>
 
       {/* Chat + right panel + bottom panel. A vertical stack: the top row is the

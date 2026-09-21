@@ -403,7 +403,7 @@ export function RightPanel({
                   {t.kind === "review" ? (
                     <ReviewTab cwd={cwd} active={isActive} fallback={diffFiles} />
                   ) : t.kind === "terminal" ? (
-                    <TerminalView cwd={cwd} />
+                    <TerminalView termId={`tab:${t.id}`} cwd={cwd} />
                   ) : t.kind === "browser" ? (
                     <BrowserTab
                       url={t.url}
