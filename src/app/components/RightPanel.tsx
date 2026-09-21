@@ -159,6 +159,7 @@ export function RightPanel({
     layout.activeTabId ?? null,
   );
   const [width, setWidth] = useState<number>(layout.rightWidth ?? DEFAULT_WIDTH);
+  const widthRef = useRef<number>(layout.rightWidth ?? DEFAULT_WIDTH);
   const [dragging, setDragging] = useState(false);
   const [fullWidth, setFullWidth] = useState(false);
   const dragState = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -271,7 +272,9 @@ export function RightPanel({
     if (!s) return;
     // Handle is on the LEFT edge: dragging left (negative dx) widens the panel.
     const dx = e.clientX - s.startX;
-    setWidth(clamp(s.startWidth - dx));
+    const w = clamp(s.startWidth - dx);
+    widthRef.current = w; // latest width, read on pointer-up to persist
+    setWidth(w);
   }, []);
 
   const onPointerUp = useCallback(() => {
@@ -279,11 +282,9 @@ export function RightPanel({
     setDragging(false);
     window.removeEventListener("pointermove", onPointerMove);
     window.removeEventListener("pointerup", onPointerUp);
-    // Commit the final width to the store (per-chat, persisted).
-    setWidth((w) => {
-      patchLayout(sessionId, { rightWidth: w });
-      return w;
-    });
+    // Commit the final width to the store (per-chat, persisted) — read from the
+    // ref so we don't call the store setter inside a setState updater.
+    patchLayout(sessionId, { rightWidth: widthRef.current });
   }, [onPointerMove, patchLayout, sessionId]);
 
   const onHandleDown = useCallback(
