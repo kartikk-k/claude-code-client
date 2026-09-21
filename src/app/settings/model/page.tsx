@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import {
   SettingsTitle,
   SettingsSection,
@@ -9,6 +8,7 @@ import {
 } from "../components/primitives";
 import { Switch, Select } from "../components/controls";
 import { EFFORT_LEVELS, type EffortLevel } from "../../components/composer/EffortMenu";
+import { usePrefsStore } from "@/stores";
 
 /** Model catalog, kept in sync with the composer's model selector. */
 const MODELS = [
@@ -25,11 +25,9 @@ type ModelId = (typeof MODELS)[number]["value"];
  * in the composer, exposed here as defaults.
  */
 export default function ModelSettings() {
-  const [defaultModel, setDefaultModel] = useState<ModelId>("sonnet");
-  const [effort, setEffort] = useState<EffortLevel>("Medium");
-  const [extendedThinking, setExtendedThinking] = useState(true);
-  const [showThinking, setShowThinking] = useState(true);
-  const [autoCompact, setAutoCompact] = useState(true);
+  const { defaultModel, defaultEffort, extendedThinking, showThinking, autoCompact } =
+    usePrefsStore((s) => s.modelSettings);
+  const patchModelSettings = usePrefsStore((s) => s.patchModelSettings);
 
   return (
     <>
@@ -43,7 +41,7 @@ export default function ModelSettings() {
             control={
               <Select<ModelId>
                 value={defaultModel}
-                onChange={setDefaultModel}
+                onChange={(defaultModel) => patchModelSettings({ defaultModel })}
                 minWidth={180}
                 options={MODELS.map((m) => ({ value: m.value, label: m.label }))}
               />
@@ -54,8 +52,8 @@ export default function ModelSettings() {
             description="How much the model thinks before responding by default."
             control={
               <Select<EffortLevel>
-                value={effort}
-                onChange={setEffort}
+                value={defaultEffort}
+                onChange={(defaultEffort) => patchModelSettings({ defaultEffort })}
                 minWidth={140}
                 options={EFFORT_LEVELS.map((e) => ({ value: e, label: e }))}
               />
@@ -72,7 +70,7 @@ export default function ModelSettings() {
             control={
               <Switch
                 checked={extendedThinking}
-                onChange={setExtendedThinking}
+                onChange={(extendedThinking) => patchModelSettings({ extendedThinking })}
                 label="Extended thinking"
               />
             }
@@ -83,7 +81,7 @@ export default function ModelSettings() {
             control={
               <Switch
                 checked={showThinking}
-                onChange={setShowThinking}
+                onChange={(showThinking) => patchModelSettings({ showThinking })}
                 label="Show thinking in transcript"
               />
             }
@@ -99,7 +97,7 @@ export default function ModelSettings() {
             control={
               <Switch
                 checked={autoCompact}
-                onChange={setAutoCompact}
+                onChange={(autoCompact) => patchModelSettings({ autoCompact })}
                 label="Auto-compact long sessions"
               />
             }

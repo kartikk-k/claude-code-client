@@ -3,78 +3,7 @@
 import { useMemo, useState } from "react";
 import { SettingsTitle } from "../components/primitives";
 import { SearchIcon, EditIcon, TrashIcon } from "../../chat/components/icons";
-
-type Shortcut = {
-  id: string;
-  label: string;
-  description: string;
-  keys: string | null;
-};
-
-/** Default shortcuts, scoped to a Claude Code client's real actions. */
-const DEFAULT_SHORTCUTS: Shortcut[] = [
-  { id: "new-chat", label: "New chat", description: "Start a new chat", keys: "⌘N" },
-  {
-    id: "new-temp",
-    label: "New temporary chat",
-    description: "Start a chat that won't appear in history",
-    keys: "⇧⌘N",
-  },
-  {
-    id: "toggle-sidebar",
-    label: "Toggle sidebar",
-    description: "Show or hide the sessions sidebar",
-    keys: "⌘B",
-  },
-  {
-    id: "search",
-    label: "Search",
-    description: "Search sessions and projects",
-    keys: "⌘K",
-  },
-  {
-    id: "send",
-    label: "Send message",
-    description: "Send the composed message",
-    keys: "⌘↵",
-  },
-  {
-    id: "stop",
-    label: "Stop generation",
-    description: "Interrupt the current response",
-    keys: "Esc",
-  },
-  {
-    id: "toggle-terminal",
-    label: "Toggle terminal",
-    description: "Show or hide the terminal panel",
-    keys: "⌃`",
-  },
-  {
-    id: "toggle-review",
-    label: "Toggle changes panel",
-    description: "Open the review / changes panel",
-    keys: "⇧⌘R",
-  },
-  {
-    id: "cycle-permission",
-    label: "Cycle permission mode",
-    description: "Switch between plan, approve, and full access",
-    keys: "⇧Tab",
-  },
-  {
-    id: "settings",
-    label: "Open settings",
-    description: "Open this settings window",
-    keys: "⌘,",
-  },
-  {
-    id: "new-window",
-    label: "Open in new window",
-    description: "Open the current chat in a new window",
-    keys: null,
-  },
-];
+import { usePrefsStore, DEFAULT_SHORTCUTS } from "@/stores";
 
 /** Render a shortcut combo as small key caps. */
 function Keys({ combo }: { combo: string | null }) {
@@ -102,7 +31,8 @@ function Keys({ combo }: { combo: string | null }) {
  * affordances, matching the reference. Editing is UI-only for now.
  */
 export default function KeyboardSettings() {
-  const [shortcuts, setShortcuts] = useState<Shortcut[]>(DEFAULT_SHORTCUTS);
+  const shortcuts = usePrefsStore((s) => s.shortcuts);
+  const setShortcuts = usePrefsStore((s) => s.setShortcuts);
   const [query, setQuery] = useState("");
 
   const visible = useMemo(() => {
@@ -169,8 +99,8 @@ export default function KeyboardSettings() {
                 type="button"
                 aria-label={`Clear ${s.label} shortcut`}
                 onClick={() =>
-                  setShortcuts((prev) =>
-                    prev.map((x) => (x.id === s.id ? { ...x, keys: null } : x))
+                  setShortcuts(
+                    shortcuts.map((x) => (x.id === s.id ? { ...x, keys: null } : x))
                   )
                 }
                 className="flex size-7 items-center justify-center rounded-md icon-faint opacity-0 transition-opacity hover:bg-nav-active-bg/60 group-hover:opacity-100"

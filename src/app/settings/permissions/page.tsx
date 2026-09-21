@@ -9,6 +9,7 @@ import {
 } from "../components/primitives";
 import { Switch, Select } from "../components/controls";
 import { PlusIcon, XIcon } from "../../chat/components/icons";
+import { usePrefsStore } from "@/stores";
 
 /** Permission modes, matching the composer's permission pill. */
 const MODES = [
@@ -26,15 +27,9 @@ type Mode = (typeof MODES)[number]["value"];
  * generic "full access" switch.
  */
 export default function PermissionsSettings() {
-  const [mode, setMode] = useState<Mode>("plan");
-  const [askOutsideWorkspace, setAskOutsideWorkspace] = useState(true);
-  const [allowNetwork, setAllowNetwork] = useState(false);
-  const [allowed, setAllowed] = useState<string[]>([
-    "Read",
-    "Edit",
-    "Bash(git *)",
-  ]);
-  const [denied, setDenied] = useState<string[]>(["Bash(rm -rf *)"]);
+  const { mode, askOutsideWorkspace, allowNetwork, allowed, denied } =
+    usePrefsStore((s) => s.permissions);
+  const patchPermissions = usePrefsStore((s) => s.patchPermissions);
 
   const fullAccess = mode === "bypassPermissions";
 
@@ -50,7 +45,7 @@ export default function PermissionsSettings() {
             control={
               <Select<Mode>
                 value={mode}
-                onChange={setMode}
+                onChange={(mode) => patchPermissions({ mode })}
                 minWidth={180}
                 options={MODES.map((m) => ({ value: m.value, label: m.label }))}
               />
@@ -62,7 +57,7 @@ export default function PermissionsSettings() {
             control={
               <Switch
                 checked={askOutsideWorkspace}
-                onChange={setAskOutsideWorkspace}
+                onChange={(askOutsideWorkspace) => patchPermissions({ askOutsideWorkspace })}
                 label="Ask before acting outside the workspace"
               />
             }
@@ -83,7 +78,7 @@ export default function PermissionsSettings() {
             control={
               <Switch
                 checked={fullAccess || allowNetwork}
-                onChange={setAllowNetwork}
+                onChange={(allowNetwork) => patchPermissions({ allowNetwork })}
                 label="Allow network access"
               />
             }
@@ -97,7 +92,7 @@ export default function PermissionsSettings() {
           description="Tools that never require a prompt. Supports glob patterns like Bash(git *)."
           accent="allow"
           items={allowed}
-          onChange={setAllowed}
+          onChange={(allowed) => patchPermissions({ allowed })}
         />
         <div className="h-4" />
         <ToolList
@@ -105,7 +100,7 @@ export default function PermissionsSettings() {
           description="Tools that are blocked outright, even in Full access mode."
           accent="deny"
           items={denied}
-          onChange={setDenied}
+          onChange={(denied) => patchPermissions({ denied })}
         />
       </SettingsSection>
     </>

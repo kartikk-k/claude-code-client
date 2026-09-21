@@ -1,6 +1,7 @@
 "use client";
 
 import { ThemeProvider } from "next-themes";
+import { StoreHydration } from "@/stores/StoreHydration";
 
 export function Providers({ children }: { children: React.ReactNode }) {
   return (
@@ -9,7 +10,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
       defaultTheme="dark"
       enableSystem={false}
     >
-      {children}
+      <StoreHydration>{children}</StoreHydration>
     </ThemeProvider>
   );
 }

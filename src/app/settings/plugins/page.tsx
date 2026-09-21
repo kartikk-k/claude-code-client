@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
 import {
   SettingsTitle,
   SettingsSection,
@@ -11,6 +10,7 @@ import { Switch } from "../components/controls";
 import { PLUGINS } from "../../plugins/catalog";
 import { PluginTile } from "../../plugins/components/PluginTile";
 import { ChevronRightIcon } from "../../chat/components/icons";
+import { usePrefsStore } from "@/stores";
 
 /**
  * Plugins & MCP settings pane — lists the connected MCP servers with an
@@ -18,17 +18,13 @@ import { ChevronRightIcon } from "../../chat/components/icons";
  * A thin management surface over the same catalog the marketplace uses.
  */
 export default function PluginsSettings() {
-  const [enabled, setEnabled] = useState<Set<string>>(
-    () => new Set(PLUGINS.filter((p) => p.installed).map((p) => p.id))
-  );
+  const mcpEnabled = usePrefsStore((s) => s.mcpEnabled);
+  const setMcpEnabled = usePrefsStore((s) => s.setMcpEnabled);
   const installed = PLUGINS.filter((p) => p.installed);
 
-  const toggle = (id: string) =>
-    setEnabled((prev) => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
-    });
+  const isEnabled = (id: string) =>
+    mcpEnabled[id] ?? PLUGINS.some((p) => p.id === id && p.installed);
+  const toggle = (id: string) => setMcpEnabled(id, !isEnabled(id));
 
   return (
     <>
@@ -71,7 +67,7 @@ export default function PluginsSettings() {
                 <ChevronRightIcon className="size-4 shrink-0 icon-faint" />
               </Link>
               <Switch
-                checked={enabled.has(p.id)}
+                checked={isEnabled(p.id)}
                 onChange={() => toggle(p.id)}
                 label={`Enable ${p.name}`}
               />

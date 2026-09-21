@@ -54,6 +54,15 @@ export function sendMessage(opts: SendOpts): ReadableStream<Uint8Array> {
   } else if (opts.newSessionId) {
     args.push("--session-id", opts.newSessionId);
   }
+  // TODO(images): Claude Code 2.1.x exposes no `--image`/attachment flag for
+  // `-p`. The only supported path is `--input-format stream-json`, feeding a
+  // user message whose `content` carries image blocks over stdin — a larger
+  // protocol change than the current positional-prompt spawn. Until we adopt
+  // stream-json input, `opts.images` is intentionally not forwarded to the CLI.
+  if (opts.images && opts.images.length) {
+    // no-op for now; see TODO above.
+  }
+
   // prompt is the trailing positional arg
   args.push(opts.prompt);
 

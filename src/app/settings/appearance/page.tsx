@@ -9,6 +9,7 @@ import {
   SettingsRow,
 } from "../components/primitives";
 import { Switch, SegmentedControl, Select } from "../components/controls";
+import { usePrefsStore } from "@/stores";
 
 type ThemeChoice = "light" | "dark";
 
@@ -28,13 +29,8 @@ function withThemeFade(apply: () => void) {
 export default function AppearanceSettings() {
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
-  const [reduceMotion, setReduceMotion] = useState(false);
-  const [fontSize, setFontSize] = useState<"small" | "medium" | "large">(
-    "medium"
-  );
-  const [monoFont, setMonoFont] = useState<"geist" | "jetbrains" | "system">(
-    "geist"
-  );
+  const { reduceMotion, fontSize, monoFont } = usePrefsStore((s) => s.appearance);
+  const patchAppearance = usePrefsStore((s) => s.patchAppearance);
 
   // next-themes resolves on the client — avoid a hydration mismatch by only
   // reflecting the real value after mount.
@@ -72,7 +68,7 @@ export default function AppearanceSettings() {
             control={
               <SegmentedControl
                 value={fontSize}
-                onChange={setFontSize}
+                onChange={(fontSize) => patchAppearance({ fontSize })}
                 options={[
                   { value: "small", label: "Small" },
                   { value: "medium", label: "Medium" },
@@ -87,7 +83,7 @@ export default function AppearanceSettings() {
             control={
               <Select
                 value={monoFont}
-                onChange={setMonoFont}
+                onChange={(monoFont) => patchAppearance({ monoFont })}
                 minWidth={160}
                 options={[
                   { value: "geist", label: "Geist Mono" },
@@ -108,7 +104,7 @@ export default function AppearanceSettings() {
             control={
               <Switch
                 checked={reduceMotion}
-                onChange={setReduceMotion}
+                onChange={(reduceMotion) => patchAppearance({ reduceMotion })}
                 label="Reduce motion"
               />
             }

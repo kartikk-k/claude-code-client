@@ -289,9 +289,15 @@ function AssistantTurn({
 export function MessageList({
   messages,
   onOpenAgent,
+  streamingText,
+  pendingUserText,
 }: {
   messages: ChatMessage[];
   onOpenAgent?: (agentId: string) => void;
+  /** Live assistant text streaming in for the current turn (append at the end). */
+  streamingText?: string;
+  /** The just-sent user prompt, shown optimistically before it lands on disk. */
+  pendingUserText?: string;
 }) {
   // Index every tool_result by its tool_use_id across the whole transcript.
   const resultsById = useMemo(() => {
@@ -330,6 +336,40 @@ export function MessageList({
           />
         );
       })}
+
+      {/* Optimistic user bubble for the just-sent prompt, shown only until the
+          durable transcript catches up (i.e. it isn't already the last turn). */}
+      {pendingUserText && !endsWithUserText(messages, pendingUserText) ? (
+        <div className="flex flex-col items-end gap-2 py-2 pl-10">
+          <div className="max-w-[70%] overflow-hidden rounded-[16.8px] bg-bubble-bg px-3 py-1.5">
+            <div className="text-sm leading-5 text-text-strong">
+              <Markdown text={pendingUserText} />
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Live assistant response streaming in. A pulsing caret marks it active. */}
+      {streamingText !== undefined ? (
+        <div className="flex flex-col py-2">
+          <div className="flex flex-col gap-1 text-text-primary">
+            <div className="text-sm leading-5">
+              <Markdown text={streamingText} />
+              <span className="ml-0.5 inline-block h-4 w-[6px] translate-y-0.5 animate-pulse bg-text-faint align-baseline" />
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
+}
+
+/** True if the last user turn's text already equals the pending prompt (so we
+ *  don't render the optimistic bubble twice after the transcript reconciles). */
+function endsWithUserText(messages: ChatMessage[], text: string): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role !== "user") continue;
+    return collectText(messages[i].content).trim() === text.trim();
+  }
+  return false;
 }

@@ -2,14 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { api, streamMessage } from "./lib/api";
-import type {
-  ChatMessage,
-  ContentBlock,
-  ProjectSummary,
-  SessionSummary,
-  SessionTranscript,
-} from "./lib/types";
+import type { ChatMessage, ContentBlock } from "./lib/types";
+import {
+  useSessionStore,
+  useUiStore,
+  useActiveTranscript,
+  useStreaming,
+} from "@/stores";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { MessageList } from "./components/MessageList";
 import { RightPanel } from "./components/RightPanel";
@@ -60,33 +59,42 @@ function buildToc(messages: ChatMessage[]): TocItem[] {
 export function ClientShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [projects, setProjects] = useState<ProjectSummary[]>([]);
-  const [sessionsByProject, setSessionsByProject] = useState<
-    Record<string, SessionSummary[]>
-  >({});
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [active, setActive] = useState<{
-    projectId: string;
-    sessionId: string;
-  } | null>(null);
-  const [transcript, setTranscript] = useState<SessionTranscript | null>(null);
+
+  // --- server-backed data + active chat (session store) ---
+  const projects = useSessionStore((s) => s.projects);
+  const sessionsByProject = useSessionStore((s) => s.sessionsByProject);
+  const active = useSessionStore((s) => s.active);
+  const serverError = useSessionStore((s) => s.serverError);
+  const loadProjects = useSessionStore((s) => s.loadProjects);
+  const loadSessions = useSessionStore((s) => s.loadSessions);
+  const selectSessionAction = useSessionStore((s) => s.selectSession);
+  const newChat = useSessionStore((s) => s.newChat);
+  const sendMessage = useSessionStore((s) => s.sendMessage);
+  const transcript = useActiveTranscript() ?? null;
+  const streaming = useStreaming(active?.sessionId);
+
+  // --- global chrome (ui store) ---
+  const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed);
+  const rightPanelOpen = useUiStore((s) => s.rightPanelOpen);
+  const rightPanelFull = useUiStore((s) => s.rightPanelFull);
+  const bottomPanelOpen = useUiStore((s) => s.bottomPanelOpen);
+  const expanded = useUiStore((s) => s.expanded);
+  const toggleSidebar = useUiStore((s) => s.toggleSidebar);
+  const setRightPanelOpen = useUiStore((s) => s.setRightPanelOpen);
+  const setRightPanelFull = useUiStore((s) => s.setRightPanelFull);
+  const toggleBottomPanel = useUiStore((s) => s.toggleBottomPanel);
+  const setBottomPanelOpen = useUiStore((s) => s.setBottomPanelOpen);
+  const toggleProjectExpanded = useUiStore((s) => s.toggleProjectExpanded);
+
+  // --- transient, presentational (stays local) ---
   const [activeAgentId, setActiveAgentId] = useState<string | undefined>();
-  const [sending, setSending] = useState(false);
-  const [serverError, setServerError] = useState<string | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [rightPanelOpen, setRightPanelOpen] = useState(true);
-  // Bottom terminal panel that spans the chat column (toggled via ⌘J or the
-  // header button); animates open/closed.
-  const [bottomPanelOpen, setBottomPanelOpen] = useState(false);
-  // Right panel expanded to full width — the chat column is hidden so the
-  // panel spans from the sidebar all the way to the window edge.
-  const [rightPanelFull, setRightPanelFull] = useState(false);
-  // A file opened from a composer attachment, shown in the panel's Preview tab.
   const [previewFile, setPreviewFile] = useState<{
     name: string;
     url: string;
     mime: string;
   } | null>(null);
+  const sending = streaming?.active ?? false;
+
   // Transcript scroll container — observed by the table-of-contents rail.
   const scrollRef = useRef<HTMLDivElement>(null);
   const resolveAnchor = useCallback(
@@ -97,41 +105,26 @@ export function ClientShell() {
     []
   );
 
-  // Load projects on mount, then prefetch every project's sessions so the
-  // Pinned + Recents sections (derived from session data) populate immediately
-  // — without waiting for the user to expand a folder first.
+  // Load projects (+ prefetch sessions) once on mount. The store dedupes so
+  // revisiting `/` after a route change doesn't refetch what's already cached.
   useEffect(() => {
-    let cancelled = false;
-    api
-      .projects()
-      .then((ps) => {
-        if (cancelled) return;
-        setProjects(ps);
-        for (const p of ps) {
-          api
-            .sessions(p.id)
-            .then((s) => {
-              if (!cancelled) {
-                setSessionsByProject((m) =>
-                  m[p.id] ? m : { ...m, [p.id]: s }
-                );
-              }
-            })
-            .catch((e) => setServerError(String(e)));
-        }
-      })
-      .catch((e) => setServerError(String(e)));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (projects.length === 0) loadProjects();
+  }, [projects.length, loadProjects]);
 
-  // ⌘B toggles the left sidebar; ⌘, opens Settings.
+  // Re-fetch the active session's transcript on mount / when it changes, so a
+  // reload that restored `active` from localStorage repopulates the view.
+  useEffect(() => {
+    if (active?.sessionId && !transcript) {
+      selectSessionAction(active.projectId, active.sessionId);
+    }
+  }, [active?.projectId, active?.sessionId, transcript, selectSessionAction]);
+
+  // ⌘B toggles the left sidebar; ⌘J the bottom panel; ⌘, opens Settings.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && (e.key === "b" || e.key === "B")) {
         e.preventDefault();
-        setSidebarCollapsed((c) => !c);
+        toggleSidebar();
       }
       if ((e.metaKey || e.ctrlKey) && e.key === ",") {
         e.preventDefault();
@@ -139,52 +132,30 @@ export function ClientShell() {
       }
       if ((e.metaKey || e.ctrlKey) && (e.key === "j" || e.key === "J")) {
         e.preventDefault();
-        setBottomPanelOpen((v) => !v);
+        toggleBottomPanel();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [router]);
-
-  const loadSessions = useCallback(
-    async (projectId: string) => {
-      if (sessionsByProject[projectId]) return;
-      try {
-        const s = await api.sessions(projectId);
-        setSessionsByProject((m) => ({ ...m, [projectId]: s }));
-      } catch (e) {
-        setServerError(String(e));
-      }
-    },
-    [sessionsByProject]
-  );
+  }, [router, toggleSidebar, toggleBottomPanel]);
 
   const toggleProject = useCallback(
     (id: string) => {
-      setExpanded((e) => ({ ...e, [id]: !e[id] }));
+      toggleProjectExpanded(id);
       loadSessions(id);
     },
-    [loadSessions]
+    [toggleProjectExpanded, loadSessions]
   );
 
   const selectSession = useCallback(
-    async (projectId: string, sessionId: string) => {
-      setActive({ projectId, sessionId });
-      setTranscript(null);
+    (projectId: string, sessionId: string) => {
       setActiveAgentId(undefined);
-      try {
-        const t = await api.session(projectId, sessionId);
-        setTranscript(t);
-      } catch (e) {
-        setServerError(String(e));
-      }
+      selectSessionAction(projectId, sessionId);
     },
-    []
+    [selectSessionAction]
   );
 
-  // Open a session requested via ?project=&session= (e.g. after picking one
-  // from the sidebar on the /plugins route). Runs once per distinct pair, then
-  // clears the params so a refresh doesn't re-trigger it.
+  // Open a session requested via ?project=&session= (legacy cross-route handoff).
   useEffect(() => {
     const projectId = searchParams.get("project");
     const sessionId = searchParams.get("session");
@@ -194,25 +165,35 @@ export function ClientShell() {
     router.replace("/");
   }, [searchParams, active?.sessionId, selectSession, router]);
 
-  // Recents: newest sessions across all loaded projects.
+  // Recents: newest sessions across all loaded projects (excluding archived).
   const recents = useMemo(() => {
     const all = Object.values(sessionsByProject).flat();
-    return all.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 6);
+    return all
+      .filter((s) => !s.archived)
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, 6);
   }, [sessionsByProject]);
 
-  // Pinned: placeholder until a real "pinned" flag exists — surface the most
-  // recent sessions that have a git branch so the Pinned section is populated.
+  // Pinned: sessions the user has explicitly pinned (real flag from meta store).
   const pinned = useMemo(() => {
     const all = Object.values(sessionsByProject).flat();
     return all
-      .filter((s) => s.gitBranch)
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-      .slice(0, 3);
+      .filter((s) => s.pinned && !s.archived)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
   }, [sessionsByProject]);
 
   const activeAgent = transcript?.agents.find(
     (a) => a.agentId === activeAgentId
   );
+
+  // The active session's sidebar metadata (pinned / archived), for the chat
+  // header's ⋯ options menu.
+  const activeSession = useMemo(() => {
+    if (!active?.sessionId) return undefined;
+    return sessionsByProject[active.projectId]?.find(
+      (s) => s.id === active.sessionId
+    );
+  }, [active?.projectId, active?.sessionId, sessionsByProject]);
 
   // Table-of-contents ticks (one per user turn) + the first PR URL referenced in
   // the transcript, both derived from the loaded messages.
@@ -236,29 +217,21 @@ export function ClientShell() {
       model: string;
       permissionMode: string;
     }) => {
-      if (!active || !transcript?.cwd) return;
-      setSending(true);
-      try {
-        for await (const frame of streamMessage({
-          cwd: transcript.cwd,
-          sessionId: active.sessionId,
-          prompt: p.text,
-          images: p.images,
-          model: p.model,
-          permissionMode: p.permissionMode,
-        })) {
-          if (frame.event === "done") break;
-        }
-        // reload the transcript to show the appended turn
-        const t = await api.session(active.projectId, active.sessionId);
-        setTranscript(t);
-      } catch (e) {
-        setServerError(String(e));
-      } finally {
-        setSending(false);
-      }
+      // Need a project + cwd to run the CLI. cwd comes from the loaded
+      // transcript (existing chat); a brand-new chat needs a selected project.
+      const cwd = transcript?.cwd;
+      if (!active || !cwd) return;
+      await sendMessage({
+        projectId: active.projectId,
+        sessionId: active.sessionId || undefined,
+        cwd,
+        text: p.text,
+        images: p.images,
+        model: p.model,
+        permissionMode: p.permissionMode,
+      });
     },
-    [active, transcript]
+    [active, transcript?.cwd, sendMessage]
   );
 
   return (
@@ -284,10 +257,7 @@ export function ClientShell() {
           expanded={expanded}
           onToggleProject={toggleProject}
           onSelectSession={selectSession}
-          onNewChat={() => {
-            setActive(null);
-            setTranscript(null);
-          }}
+          onNewChat={() => newChat(active?.projectId)}
           usagePctLeft={45}
         />
       </div>
@@ -315,10 +285,14 @@ export function ClientShell() {
       >
         <ChatNav
           title={transcript?.title ?? "Claude Client"}
+          projectId={active?.projectId}
+          sessionId={active?.sessionId}
+          pinned={activeSession?.pinned}
+          archived={activeSession?.archived}
           rightPanelOpen={rightPanelOpen}
-          onToggleRightPanel={() => setRightPanelOpen((v) => !v)}
+          onToggleRightPanel={() => setRightPanelOpen(!rightPanelOpen)}
           bottomPanelOpen={bottomPanelOpen}
-          onToggleBottomPanel={() => setBottomPanelOpen((v) => !v)}
+          onToggleBottomPanel={toggleBottomPanel}
         />
         <div className="relative flex flex-1 overflow-hidden">
           {/* Table-of-contents rail, overlaid on the left edge of the
@@ -363,6 +337,12 @@ export function ClientShell() {
                 <MessageList
                   messages={transcript.messages}
                   onOpenAgent={(id) => setActiveAgentId(id)}
+                  streamingText={
+                    streaming?.active ? streaming.text : undefined
+                  }
+                  pendingUserText={
+                    streaming?.active ? streaming.pendingUserText : undefined
+                  }
                 />
               </>
             ) : (
@@ -380,6 +360,7 @@ export function ClientShell() {
                 onSend={onSend}
                 disabled={sending || !active}
                 cwd={transcript?.cwd}
+                sessionId={active?.sessionId}
                 gitBranch={transcript?.gitBranch}
                 onOpenInPanel={(f) => {
                   setPreviewFile(f);
@@ -396,14 +377,12 @@ export function ClientShell() {
       <RightPanel
         cwd={transcript?.cwd}
         open={rightPanelOpen}
-        onOpenChange={(next) => {
-          setRightPanelOpen(next);
-          if (!next) setRightPanelFull(false);
-        }}
+        onOpenChange={setRightPanelOpen}
         onFullWidthChange={setRightPanelFull}
         bottomPanelOpen={bottomPanelOpen}
-        onToggleBottomPanel={() => setBottomPanelOpen((v) => !v)}
+        onToggleBottomPanel={toggleBottomPanel}
         previewFile={previewFile}
+        sessionId={active?.sessionId}
       />
         </div>
 
@@ -413,6 +392,7 @@ export function ClientShell() {
           open={bottomPanelOpen}
           cwd={transcript?.cwd}
           onClose={() => setBottomPanelOpen(false)}
+          sessionId={active?.sessionId}
         />
       </div>
       {/* activeAgent handling retained for future wiring into the panel. */}

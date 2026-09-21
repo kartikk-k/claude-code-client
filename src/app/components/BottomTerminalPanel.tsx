@@ -6,29 +6,48 @@
  * horizontal row in the shell. Toggled from the chat header / right-panel header
  * (⌘J): it stays mounted and animates its height 0 ↔ open so it slides up/down
  * smoothly. Its open height is drag-adjustable via the top-edge handle.
- * Wiring to a real PTY is future work.
+ *
+ * NOTE: A PTY backend exists at ws://localhost:4317/api/pty?cwd=<cwd>, but
+ * node-pty output does not flow under Bun yet, so the live terminal (xterm)
+ * wiring is intentionally deferred pending backend (Bun/node-pty) support. This
+ * pane stays a static prompt placeholder until then.
  */
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { TerminalTabIcon, AddTabIcon, XIcon } from "../chat/components/icons";
 import { Tooltip } from "./ui/Tooltip";
-
-const MIN_HEIGHT = 140;
-const MAX_HEIGHT = 560;
-const DEFAULT_HEIGHT = 260;
+import {
+  useChatLayout,
+  useUiStore,
+  BOTTOM_MIN_HEIGHT as MIN_HEIGHT,
+  BOTTOM_MAX_HEIGHT as MAX_HEIGHT,
+  BOTTOM_DEFAULT_HEIGHT as DEFAULT_HEIGHT,
+} from "@/stores";
 
 export function BottomTerminalPanel({
   open,
   cwd,
   onClose,
+  sessionId,
 }: {
   open: boolean;
   /** Active session's working directory — shown as the terminal's cwd + tab. */
   cwd?: string;
   onClose: () => void;
+  /** Active session id — keys the persisted per-chat height. */
+  sessionId?: string;
 }) {
-  const [height, setHeight] = useState(DEFAULT_HEIGHT);
+  // Per-chat height: seed from the store, commit on pointer-up.
+  const layout = useChatLayout(sessionId);
+  const patchLayout = useUiStore((s) => s.patchLayout);
+  const [height, setHeight] = useState(layout.bottomHeight ?? DEFAULT_HEIGHT);
   const [dragging, setDragging] = useState(false);
   const dragState = useRef<{ startY: number; startHeight: number } | null>(null);
+
+  // Re-seed when the active chat changes (each chat keeps its own height).
+  useEffect(() => {
+    setHeight(layout.bottomHeight ?? DEFAULT_HEIGHT);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
 
   const dir = cwd || "~";
   // The tab label is the working directory's last path segment (or "~").
@@ -49,7 +68,11 @@ export function BottomTerminalPanel({
     setDragging(false);
     window.removeEventListener("pointermove", onPointerMove);
     window.removeEventListener("pointerup", onPointerUp);
-  }, [onPointerMove]);
+    setHeight((h) => {
+      patchLayout(sessionId, { bottomHeight: h });
+      return h;
+    });
+  }, [onPointerMove, patchLayout, sessionId]);
 
   const onHandleDown = useCallback(
     (e: React.PointerEvent) => {

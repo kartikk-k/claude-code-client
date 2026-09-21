@@ -12,6 +12,7 @@ import {
   LinkIcon,
   WrenchIcon,
 } from "../../chat/components/icons";
+import { usePrefsStore } from "@/stores";
 
 /**
  * Plugin detail page — hero (mark, name, tagline, actions), example prompts,
@@ -20,7 +21,10 @@ import {
  * copy are UI-only for now.
  */
 export function PluginDetail({ plugin }: { plugin: Plugin }) {
-  const [installed, setInstalled] = useState(plugin.installed);
+  const installed = usePrefsStore(
+    (s) => s.pluginsInstalled[plugin.id] ?? plugin.installed
+  );
+  const setPluginInstalled = usePrefsStore((s) => s.setPluginInstalled);
   const [copied, setCopied] = useState(false);
 
   const copyCommand = async () => {
@@ -77,7 +81,7 @@ export function PluginDetail({ plugin }: { plugin: Plugin }) {
             </button>
             <button
               type="button"
-              onClick={() => setInstalled((v) => !v)}
+              onClick={() => setPluginInstalled(plugin.id, !installed)}
               className={[
                 "flex h-9 items-center gap-1.5 rounded-[11px] px-3.5 text-[13px] font-semibold transition-colors",
                 installed

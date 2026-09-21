@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import {
   SettingsTitle,
   SettingsSection,
@@ -10,11 +9,12 @@ import {
   RowButton,
 } from "../components/primitives";
 import { Switch } from "../components/controls";
+import { usePrefsStore } from "@/stores";
 
 /** About pane — app/CLI versions, update behavior, and links. */
 export default function AboutSettings() {
-  const [autoUpdate, setAutoUpdate] = useState(true);
-  const [beta, setBeta] = useState(false);
+  const { autoUpdate, beta } = usePrefsStore((s) => s.about);
+  const patchAbout = usePrefsStore((s) => s.patchAbout);
 
   return (
     <>
@@ -40,7 +40,7 @@ export default function AboutSettings() {
             control={
               <Switch
                 checked={autoUpdate}
-                onChange={setAutoUpdate}
+                onChange={(autoUpdate) => patchAbout({ autoUpdate })}
                 label="Install updates automatically"
               />
             }
@@ -48,7 +48,7 @@ export default function AboutSettings() {
           <SettingsRow
             title="Beta channel"
             description="Get early builds. May be less stable."
-            control={<Switch checked={beta} onChange={setBeta} label="Beta channel" />}
+            control={<Switch checked={beta} onChange={(beta) => patchAbout({ beta })} label="Beta channel" />}
           />
         </SettingsCard>
       </SettingsSection>

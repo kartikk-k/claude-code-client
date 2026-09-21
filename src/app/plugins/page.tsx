@@ -10,6 +10,7 @@ import {
   CheckIcon,
   ChevronRightIcon,
 } from "../chat/components/icons";
+import { usePrefsStore } from "@/stores";
 
 /**
  * Plugins marketplace — a collection of MCP servers Claude Code can connect to.
@@ -19,16 +20,20 @@ import {
  */
 export default function PluginsPage() {
   const [query, setQuery] = useState("");
-  const [installed, setInstalled] = useState<Set<string>>(
-    () => new Set(PLUGINS.filter((p) => p.installed).map((p) => p.id))
+  const pluginsInstalled = usePrefsStore((s) => s.pluginsInstalled);
+  const setPluginInstalled = usePrefsStore((s) => s.setPluginInstalled);
+
+  const installed = useMemo(
+    () =>
+      new Set(
+        PLUGINS.filter((p) => pluginsInstalled[p.id] ?? p.installed).map(
+          (p) => p.id
+        )
+      ),
+    [pluginsInstalled]
   );
 
-  const toggle = (id: string) =>
-    setInstalled((prev) => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
-    });
+  const toggle = (id: string) => setPluginInstalled(id, !installed.has(id));
 
   const q = query.trim().toLowerCase();
   const matches = useMemo(

@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { ProjectSummary, SessionSummary } from "../lib/types";
+import { useSessionStore } from "@/stores";
 import {
   ChevronDownIcon,
   ChevronRightIcon,
@@ -16,7 +17,6 @@ import {
   ClockIcon,
   CompassIcon,
   CodePullRequestIcon,
-  CodeMergeIcon,
   CodeForkIcon,
   PinIcon,
   ArchiveIcon,
@@ -58,49 +58,30 @@ export function relativeTime(ms: number): string {
 }
 
 /**
- * A session's git / PR state, driving the trailing glyph on its row. A plain
- * "branch" (or null) shows NO icon — only a merged / open-PR / forked state is
- * worth a glyph. The server doesn't send this yet, so `sessionGitStatus` mocks
- * it below.
+ * A session's git state, driving the trailing glyph on its row. Only a session
+ * that is actually on a git branch is worth a glyph — everything else is null.
  */
-type GitStatus = "merged" | "open_pr" | "forked" | "branch" | null;
+type GitStatus = "branch" | null;
 
 /**
- * MOCK git status for a session. Derives a stable pseudo-random state from the
- * id so the sidebar demonstrates the icon variation without a backend. Sessions
- * with no branch never get a status.
- * TODO: wire to real git status
+ * Real git status for a session: driven purely by the `gitBranch` field the
+ * server sends. If the session is on a branch we show the branch glyph;
+ * otherwise no glyph. We intentionally do NOT fetch per-row git status (PR /
+ * merge state) here — that would be far too expensive for a sidebar list.
  */
 export function sessionGitStatus(session: SessionSummary): GitStatus {
-  if (!session.gitBranch) return null;
-  // Cheap stable hash of the id → a bucket, so the same session is consistent.
-  let hash = 0;
-  for (let i = 0; i < session.id.length; i++) {
-    hash = (hash * 31 + session.id.charCodeAt(i)) | 0;
-  }
-  const bucket = Math.abs(hash) % 4;
-  // 'branch' → no icon; the other three each get a distinct glyph/tint.
-  return (["merged", "open_pr", "forked", "branch"] as const)[bucket];
+  return session.gitBranch ? "branch" : null;
 }
 
 /**
- * Trailing git glyph for a session row, or null when the status doesn't warrant
- * one. Each status has its own dedicated Nucleo glyph: an open PR is accented
- * (purple), a merge / fork is muted.
+ * Trailing git glyph for a session row, or null when the session isn't on a
+ * branch. The branch/fork glyph is muted so it reads as ambient metadata.
  */
 function GitStatusIcon({ status }: { status: GitStatus }) {
-  if (status === "open_pr") {
-    return (
-      <CodePullRequestIcon className="size-4 shrink-0 text-[color:var(--agent-accent)]" />
-    );
-  }
-  if (status === "merged") {
-    return <CodeMergeIcon className="size-4 shrink-0 icon-muted" />;
-  }
-  if (status === "forked") {
+  if (status === "branch") {
     return <CodeForkIcon className="size-4 shrink-0 icon-muted" />;
   }
-  return null; // 'branch' | null → no icon
+  return null;
 }
 
 type SessionSidebarProps = {
@@ -157,25 +138,35 @@ function SectionHeading({ children }: { children: React.ReactNode }) {
   );
 }
 
-/** Small round hover-action button shown on a row's right edge on hover. */
+/** Small round hover-action button shown on a row's right edge on hover.
+ *  When `active`, it renders in the accent color to reflect a toggled-on
+ *  state (e.g. a pinned or archived session). */
 function RowActionButton({
   label,
   onClick,
+  active = false,
   children,
 }: {
   label: string;
   onClick?: (e: React.MouseEvent) => void;
+  active?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <button
       type="button"
       aria-label={label}
+      aria-pressed={active}
       onClick={(e) => {
         e.stopPropagation();
         onClick?.(e);
       }}
-      className="flex size-6 items-center justify-center rounded-[7px] icon-muted transition-[opacity,background-color] duration-150 ease-out hover:bg-nav-active-bg hover:opacity-100"
+      className={[
+        "flex size-6 items-center justify-center rounded-[7px] transition-[opacity,background-color,color] duration-150 ease-out hover:bg-nav-active-bg hover:opacity-100",
+        active
+          ? "text-[color:var(--agent-accent)] opacity-100"
+          : "icon-muted",
+      ].join(" ")}
     >
       {children}
     </button>
@@ -204,11 +195,41 @@ function SessionRow({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const moreRef = useRef<HTMLButtonElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const setPinned = useSessionStore((s) => s.setPinned);
+  const setArchived = useSessionStore((s) => s.setArchived);
+  const renameSession = useSessionStore((s) => s.renameSession);
+
+  // Inline rename editor: replaces the title text with an <input> while active.
+  const [renaming, setRenaming] = useState(false);
+  const [draftTitle, setDraftTitle] = useState(session.title);
+
+  const startRename = () => {
+    setDraftTitle(session.title);
+    setRenaming(true);
+  };
+  const commitRename = () => {
+    if (!renaming) return;
+    const next = draftTitle.trim();
+    if (next && next !== session.title) {
+      renameSession(session.projectId, session.id, next);
+    }
+    setRenaming(false);
+  };
+  const cancelRename = () => {
+    setDraftTitle(session.title);
+    setRenaming(false);
+  };
+  // Focus + select the input when the editor opens.
+  useEffect(() => {
+    if (renaming && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [renaming]);
+
   const gitStatus = sessionGitStatus(session);
-  const showGitIcon =
-    gitStatus === "merged" ||
-    gitStatus === "open_pr" ||
-    gitStatus === "forked";
+  const showGitIcon = gitStatus === "branch";
 
   const cardRows: HoverMetaRow[] = [];
   if (project) {
@@ -244,60 +265,108 @@ function SessionRow({
         moreRef.current?.click();
       }}
     >
-      <button
-        type="button"
-        onClick={onSelect}
-        aria-current={active ? "page" : undefined}
-        className={[
-          "flex h-8 w-full items-center gap-2 overflow-hidden rounded-[11.2px] px-2 text-left transition-colors duration-150 ease-out",
-          active
-            ? "bg-nav-active-bg text-text-strong"
-            : "text-text-secondary hover:bg-nav-active-bg",
-        ].join(" ")}
-      >
-        {/* min-w-0 lets the title actually truncate instead of pushing under
-            the trailing icon. A right padding reserves space for the git glyph
-            so text and icon never overlap. */}
-        <span
+      {renaming ? (
+        // Inline rename editor — same footprint as the row button, styled with
+        // the app tokens. Enter or blur commits, Escape cancels.
+        <div
           className={[
-            "min-w-0 flex-1 truncate text-sm leading-5",
-            active ? "font-medium" : "",
-            showGitIcon ? "pr-1" : "",
+            "flex h-8 w-full items-center gap-2 rounded-[11.2px] px-2",
+            active ? "bg-nav-active-bg" : "bg-nav-active-bg",
           ].join(" ")}
         >
-          {session.title}
-        </span>
-        {trailing ? (
-          <span className="shrink-0 group-hover:opacity-0 group-focus-within:opacity-0">
-            {trailing}
+          <input
+            ref={inputRef}
+            value={draftTitle}
+            onChange={(e) => setDraftTitle(e.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commitRename();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                cancelRename();
+              }
+            }}
+            aria-label="Rename session"
+            className="min-w-0 flex-1 bg-transparent text-sm font-medium leading-5 text-text-strong outline-none"
+          />
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={onSelect}
+          aria-current={active ? "page" : undefined}
+          className={[
+            "flex h-8 w-full items-center gap-2 overflow-hidden rounded-[11.2px] px-2 text-left transition-colors duration-150 ease-out",
+            active
+              ? "bg-nav-active-bg text-text-strong"
+              : "text-text-secondary hover:bg-nav-active-bg",
+          ].join(" ")}
+        >
+          {/* min-w-0 lets the title actually truncate instead of pushing under
+              the trailing icon. A right padding reserves space for the git glyph
+              so text and icon never overlap. */}
+          <span
+            className={[
+              "min-w-0 flex-1 truncate text-sm leading-5",
+              active ? "font-medium" : "",
+              showGitIcon ? "pr-1" : "",
+            ].join(" ")}
+          >
+            {session.title}
           </span>
-        ) : null}
-        {showGitIcon ? (
-          <span className="shrink-0 group-hover:opacity-0 group-focus-within:opacity-0">
-            <GitStatusIcon status={gitStatus} />
-          </span>
-        ) : null}
-      </button>
+          {trailing ? (
+            <span className="shrink-0 group-hover:opacity-0 group-focus-within:opacity-0">
+              {trailing}
+            </span>
+          ) : null}
+          {showGitIcon ? (
+            <span className="shrink-0 group-hover:opacity-0 group-focus-within:opacity-0">
+              <GitStatusIcon status={gitStatus} />
+            </span>
+          ) : null}
+        </button>
+      )}
 
       {/* Hover action buttons: pin + archive. A solid background (matching the
           hovered row) sits behind them so a long title is cleanly masked — no
-          overlap. */}
-      <span className="pointer-events-none absolute inset-y-0 right-0 flex items-center gap-0.5 rounded-r-[11.2px] bg-nav-active-bg pl-2 pr-1.5 opacity-0 transition-opacity duration-150 ease-out group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
-        <RowActionButton label="Pin">
-          <PinIcon width={15} height={15} />
-        </RowActionButton>
-        <RowActionButton label="Archive">
-          <ArchiveIcon width={15} height={15} />
-        </RowActionButton>
-      </span>
+          overlap. Hidden while inline-renaming so they don't cover the input. */}
+      {!renaming ? (
+        <span className="pointer-events-none absolute inset-y-0 right-0 flex items-center gap-0.5 rounded-r-[11.2px] bg-nav-active-bg pl-2 pr-1.5 opacity-0 transition-opacity duration-150 ease-out group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+          <RowActionButton
+            label={session.pinned ? "Unpin" : "Pin"}
+            active={session.pinned}
+            onClick={() =>
+              setPinned(session.projectId, session.id, !session.pinned)
+            }
+          >
+            <PinIcon width={15} height={15} />
+          </RowActionButton>
+          <RowActionButton
+            label={session.archived ? "Unarchive" : "Archive"}
+            active={session.archived}
+            onClick={() =>
+              setArchived(session.projectId, session.id, !session.archived)
+            }
+          >
+            <ArchiveIcon width={15} height={15} />
+          </RowActionButton>
+        </span>
+      ) : null}
 
       {/* Full right-click context menu (hidden trigger anchored to the row). */}
       <span className="absolute right-1.5 top-1/2 -translate-y-1/2">
         <SessionRowMenu
-          title={session.title}
+          projectId={session.projectId}
+          sessionId={session.id}
+          pinned={session.pinned}
+          archived={session.archived}
           triggerRef={moreRef}
           open={menuOpen}
           onOpenChange={setMenuOpen}
+          onRename={startRename}
+          onCopyTitle={() => navigator.clipboard.writeText(session.title)}
         />
       </span>
     </div>
@@ -547,6 +616,7 @@ export function SessionSidebar({
           Claude
         </span>
         <div className="ml-auto flex items-center gap-0.5">
+          {/* TODO: wire Search + Notifications (out of scope for this pass). */}
           <Tooltip label="Search" shortcut="⌘K" side="bottom">
             <button
               type="button"

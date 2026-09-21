@@ -17,6 +17,12 @@ export type SessionSummary = {
   messageCount: number;
   updatedAt: number;
   createdAt: number;
+  /** Client-side metadata merged from the server's sidecar meta store. */
+  pinned?: boolean;
+  archived?: boolean;
+  archivedAt?: number;
+  /** User-set title override; when present, `title` mirrors it. */
+  customTitle?: string;
 };
 
 export type ContentBlock =

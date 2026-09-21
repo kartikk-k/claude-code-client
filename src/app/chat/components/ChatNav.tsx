@@ -43,12 +43,21 @@ function IconButton({
 
 export function ChatNav({
   title,
+  projectId,
+  sessionId,
+  pinned = false,
+  archived = false,
   rightPanelOpen = true,
   onToggleRightPanel,
   bottomPanelOpen = false,
   onToggleBottomPanel,
 }: {
   title: string;
+  /** Active session identity, forwarded to the ⋯ chat-options menu. */
+  projectId?: string;
+  sessionId?: string;
+  pinned?: boolean;
+  archived?: boolean;
   rightPanelOpen?: boolean;
   onToggleRightPanel?: () => void;
   bottomPanelOpen?: boolean;
@@ -71,6 +80,10 @@ export function ChatNav({
         {/* More options — opens the chat context menu (Rename / Pin / … ). */}
         <ChatOptionsMenu
           title={title}
+          projectId={projectId}
+          sessionId={sessionId}
+          pinned={pinned}
+          archived={archived}
           trigger={
             <IconButton label="More options">
               <DotsIcon width={18} height={18} />

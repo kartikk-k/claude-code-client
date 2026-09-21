@@ -50,6 +50,7 @@ import {
 } from "./composer/Popovers";
 import { PermissionMenu, ModelMenu } from "./composer/ToolbarMenus";
 import { EffortMenu, type EffortLevel } from "./composer/EffortMenu";
+import { usePrefsStore, useUiStore, type ModelId } from "@/stores";
 
 /* -------------------------------------------------------------------------- */
 /* Types + static config                                                      */
@@ -64,6 +65,8 @@ export type RichComposerProps = {
   }) => void;
   disabled?: boolean;
   cwd?: string;
+  /** Active session id — keys the per-chat draft persisted in the UI store. */
+  sessionId?: string;
   /** Active session's git branch, if any — drives the branch chip. */
   gitBranch?: string;
   /** Open a file attachment in the right sidebar's Preview tab. */
@@ -237,6 +240,7 @@ export function RichComposer({
   onSend,
   disabled = false,
   cwd,
+  sessionId,
   gitBranch,
   onOpenInPanel,
 }: RichComposerProps) {
@@ -244,6 +248,8 @@ export function RichComposer({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  // Debounce timer for persisting the draft as the user types.
+  const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // `images` holds ALL attachments (images + files); the name is kept for churn.
   const [images, setImages] = useState<Thumb[]>([]);
@@ -252,9 +258,18 @@ export function RichComposer({
   // The image currently shown in the lightbox preview (null = closed).
   const [previewImage, setPreviewImage] = useState<Thumb | null>(null);
 
-  const [model, setModel] = useState("sonnet");
-  const [effort, setEffort] = useState<EffortLevel>("Medium");
-  const [permission, setPermission] = useState<PermissionValue>("plan");
+  // Model / effort / permission are the global composer defaults, so they
+  // persist across chats and reloads (read + written via the prefs store).
+  const model = usePrefsStore((s) => s.model);
+  const setModel = usePrefsStore((s) => s.setModel);
+  const effort = usePrefsStore((s) => s.effort);
+  const setEffort = usePrefsStore((s) => s.setEffort);
+  const permission = usePrefsStore((s) => s.permission);
+  const setPermission = usePrefsStore((s) => s.setPermission);
+
+  // Per-chat draft persistence, keyed by sessionId in the UI store.
+  const patchLayout = useUiStore((s) => s.patchLayout);
+  const getLayout = useUiStore((s) => s.getLayout);
 
   const [menu, setMenu] = useState<OpenMenu>("none");
   const [mentionQuery, setMentionQuery] = useState("");
@@ -314,6 +329,41 @@ export function RichComposer({
     if (!el) return;
     setHasText(serialize(el).length > 0);
   }, []);
+
+  /* --------------------------- draft persistence -------------------------- */
+
+  // Seed the editor from the saved draft on mount and whenever the active chat
+  // changes. Drafts are stored as plain text, so we restore them as the
+  // editor's text content (pills aren't re-hydrated — matching the store's
+  // plain-text contract). Persist the previous chat's draft on switch/unmount.
+  useEffect(() => {
+    const el = editorRef.current;
+    if (!el) return;
+    const saved = getLayout(sessionId).draft ?? "";
+    el.textContent = saved;
+    setHasText(saved.length > 0);
+    // Flush any pending debounced write for the outgoing chat.
+    return () => {
+      if (draftTimerRef.current) {
+        clearTimeout(draftTimerRef.current);
+        draftTimerRef.current = null;
+      }
+      const cur = editorRef.current;
+      if (cur) patchLayout(sessionId, { draft: serialize(cur) });
+    };
+    // Re-seed only when the target chat changes; getLayout/patchLayout are
+    // stable store actions.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  /** Debounced persist of the current editor draft (~300ms). */
+  const persistDraftDebounced = useCallback(() => {
+    if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
+    draftTimerRef.current = setTimeout(() => {
+      const el = editorRef.current;
+      if (el) patchLayout(sessionId, { draft: serialize(el) });
+    }, 300);
+  }, [sessionId, patchLayout]);
 
   /** Insert a node at the current caret, then place the caret after it. */
   const insertAtCaret = useCallback(
@@ -405,7 +455,8 @@ export function RichComposer({
   const onInput = useCallback(() => {
     recompute();
     detectTriggers();
-  }, [recompute, detectTriggers]);
+    persistDraftDebounced();
+  }, [recompute, detectTriggers, persistDraftDebounced]);
 
   /* ------------------------------ handlers ------------------------------- */
 
@@ -494,7 +545,13 @@ export function RichComposer({
     setImages([]);
     setHasText(false);
     closeMenu();
-  }, [canSend, images, model, permission, onSend, closeMenu]);
+    // Sent successfully → drop the persisted draft for this chat.
+    if (draftTimerRef.current) {
+      clearTimeout(draftTimerRef.current);
+      draftTimerRef.current = null;
+    }
+    patchLayout(sessionId, { draft: "" });
+  }, [canSend, images, model, permission, onSend, closeMenu, patchLayout, sessionId]);
 
   /* --------------------------- menu selections --------------------------- */
 
@@ -850,7 +907,7 @@ export function RichComposer({
               <ModelMenu
                 value={model}
                 options={MODEL_OPTIONS}
-                onChange={setModel}
+                onChange={(id) => setModel(id as ModelId)}
                 trigger={
                   <PillButton
                     icon={<SparkleSingleIcon width={15} height={15} />}

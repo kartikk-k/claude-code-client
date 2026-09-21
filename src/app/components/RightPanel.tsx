@@ -8,6 +8,10 @@ import {
   SideChatTabIcon,
   GlobeIcon,
   FileIcon,
+  FolderIcon,
+  FolderOpenIcon,
+  ChevronRightIcon,
+  RefreshIcon,
   AddTabIcon,
   XIcon,
   SortIcon,
@@ -19,6 +23,9 @@ import {
   BottomPanelClosedIcon,
 } from "../chat/components/icons";
 import { Tooltip } from "./ui/Tooltip";
+import { CodeBlock } from "./blocks/CodeBlock";
+import { api, type GitStatus, type GitFile, type FileEntry } from "../lib/api";
+import { useChatLayout, useUiStore } from "@/stores";
 
 /**
  * A single changed file in the Review tab. Kept intentionally small and
@@ -99,6 +106,8 @@ export type RightPanelProps = {
   onToggleBottomPanel?: () => void;
   /** A file opened from a composer attachment — shown in the Preview tab. */
   previewFile?: PreviewFile | null;
+  /** Active session id — keys the persisted per-chat width + tab. */
+  sessionId?: string;
 };
 
 export function RightPanel({
@@ -111,8 +120,34 @@ export function RightPanel({
   bottomPanelOpen = false,
   onToggleBottomPanel,
   previewFile = null,
+  sessionId,
 }: RightPanelProps) {
-  const [tab, setTab] = useState<TabId>(defaultTab);
+  // Per-chat layout: seed width + tab from the store for this session; commit
+  // changes back so each chat resumes its own panel size + open tab.
+  const layout = useChatLayout(sessionId);
+  const patchLayout = useUiStore((s) => s.patchLayout);
+
+  const [tab, setTabState] = useState<TabId>(layout.rightTab ?? defaultTab);
+  const [width, setWidth] = useState<number>(layout.rightWidth ?? DEFAULT_WIDTH);
+  const [dragging, setDragging] = useState(false);
+  const [fullWidth, setFullWidth] = useState(false);
+  const dragState = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  // Re-seed local width + tab when the active chat changes (its saved layout).
+  useEffect(() => {
+    setWidth(layout.rightWidth ?? DEFAULT_WIDTH);
+    setTabState(layout.rightTab ?? defaultTab);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  // Set the tab AND persist it for this chat.
+  const setTab = useCallback(
+    (next: TabId) => {
+      setTabState(next);
+      patchLayout(sessionId, { rightTab: next });
+    },
+    [patchLayout, sessionId],
+  );
 
   // When a file is opened from the composer, jump to the Preview tab (and make
   // sure the panel is open). Keyed on url so a new/re-opened file re-triggers.
@@ -122,10 +157,6 @@ export function RightPanel({
     if (!open) onOpenChange?.(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [previewFile?.url]);
-  const [width, setWidth] = useState<number>(DEFAULT_WIDTH);
-  const [dragging, setDragging] = useState(false);
-  const [fullWidth, setFullWidth] = useState(false);
-  const dragState = useRef<{ startX: number; startWidth: number } | null>(null);
 
   const collapse = () => onOpenChange?.(false);
   const toggleFullWidth = () => {
@@ -149,7 +180,12 @@ export function RightPanel({
     setDragging(false);
     window.removeEventListener("pointermove", onPointerMove);
     window.removeEventListener("pointerup", onPointerUp);
-  }, [onPointerMove]);
+    // Commit the final width to the store (per-chat, persisted).
+    setWidth((w) => {
+      patchLayout(sessionId, { rightWidth: w });
+      return w;
+    });
+  }, [onPointerMove, patchLayout, sessionId]);
 
   const onHandleDown = useCallback(
     (e: React.PointerEvent) => {
@@ -253,7 +289,7 @@ export function RightPanel({
           />
           <div className="min-h-0 flex-1 overflow-y-auto">
             {tab === "review" ? (
-              <ReviewTab files={diffFiles} />
+              <ReviewTab cwd={cwd} active={tab === "review"} fallback={diffFiles} />
             ) : tab === "terminal" ? (
               <TerminalPane cwd={cwd} />
             ) : tab === "browser" ? (
@@ -263,11 +299,7 @@ export function RightPanel({
                 hint="No page open."
               />
             ) : tab === "files" ? (
-              <PlaceholderTab
-                Icon={FilesTabIcon}
-                title="No files"
-                hint="Open a file to see it here."
-              />
+              <FilesTab cwd={cwd} active={tab === "files"} />
             ) : tab === "preview" ? (
               <PreviewTab file={previewFile} />
             ) : (
@@ -287,8 +319,13 @@ export function RightPanel({
 
 /**
  * Terminal placeholder — shows the working directory it would open in (the
- * active session's cwd). Wiring to a real PTY comes later; for now it renders
- * the prompt line so the layout and directory are visible.
+ * active session's cwd). For now it renders the prompt line so the layout and
+ * directory are visible.
+ *
+ * NOTE: The PTY backend exists at ws://localhost:4317/api/pty?cwd=<cwd>, but
+ * node-pty output does not flow under Bun yet, so live terminal streaming
+ * (xterm wiring) is intentionally deferred pending backend (Bun/node-pty)
+ * support. Leaving this as a static prompt placeholder until then.
  */
 function TerminalPane({ cwd, compact }: { cwd?: string; compact?: boolean }) {
   const dir = cwd || "~";
@@ -494,27 +531,106 @@ const HeaderIconButton = forwardRef<
   );
 });
 
-/** Review tab: toolbar with totals + scrollable list of changed files. */
-function ReviewTab({ files }: { files: DiffFile[] }) {
+/** Repo name shown in the toolbar, derived from the cwd's last path segment. */
+function repoNameFromCwd(cwd?: string): string {
+  if (!cwd) return "app";
+  return cwd.split("/").filter(Boolean).pop() || "app";
+}
+
+/**
+ * Review tab: toolbar with repo/branch + totals, and a scrollable list of the
+ * changed files from `git status`. Staged + unstaged files are shown; clicking a
+ * row loads its diff (`git diff`) inline. Data is fetched on demand when the tab
+ * is active and `cwd` is set. With no cwd it falls back to the mock so the
+ * standalone story still renders.
+ */
+function ReviewTab({
+  cwd,
+  active,
+  fallback,
+}: {
+  cwd?: string;
+  active: boolean;
+  fallback: DiffFile[];
+}) {
+  const [status, setStatus] = useState<GitStatus | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // The currently-expanded file's diff (path → keyed so switching re-fetches).
+  const [openFile, setOpenFile] = useState<string | null>(null);
+  const [nonce, setNonce] = useState(0);
+
+  const load = useCallback(() => {
+    if (!cwd) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    api
+      .gitStatus(cwd)
+      .then((s) => {
+        if (!cancelled) setStatus(s);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setStatus(null);
+          setError(e instanceof Error ? e.message : "Failed to load git status");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd]);
+
+  // Fetch when the tab becomes active, cwd changes, or a manual refresh fires.
+  useEffect(() => {
+    if (!active || !cwd) return;
+    const cleanup = load();
+    return cleanup;
+  }, [active, cwd, nonce, load]);
+
+  // Reset the open diff when switching directories.
+  useEffect(() => {
+    setOpenFile(null);
+  }, [cwd]);
+
+  // Build the display list from real data (staged first, then unstaged) when a
+  // cwd is present; otherwise fall back to the mock diff.
+  const gitFiles: (GitFile & { staged: boolean })[] = status
+    ? [
+        ...status.staged.map((f) => ({ ...f, staged: true })),
+        ...status.unstaged.map((f) => ({ ...f, staged: false })),
+      ]
+    : [];
+  const usingReal = !!cwd;
+  const files: DiffFile[] = usingReal
+    ? gitFiles.map((f) => ({ path: f.path, added: f.added, removed: f.removed, kind: f.status }))
+    : fallback;
+
   const totalAdded = files.reduce((s, f) => s + f.added, 0);
   const totalRemoved = files.reduce((s, f) => s + f.removed, 0);
 
+  const repo = repoNameFromCwd(cwd);
+  const empty = usingReal && !loading && !error && files.length === 0;
+
   return (
     <div className="flex h-full flex-col">
-      {/* Toolbar: repo + staged selectors, totals, and view controls. */}
+      {/* Toolbar: repo + branch selectors, totals, and view controls. */}
       <div className="flex h-10 shrink-0 items-center gap-2 px-3">
         <button
           type="button"
           className="flex items-center gap-1 text-[13px] font-medium leading-5 text-text-strong transition-colors duration-150 ease-out hover:text-text-primary"
         >
-          app
+          {repo}
           <ChevronDownIcon width={14} height={14} className="icon-muted" />
         </button>
         <button
           type="button"
-          className="flex items-center gap-1 text-[13px] leading-5 text-text-secondary transition-colors duration-150 ease-out hover:text-text-strong"
+          className="flex items-center gap-1 truncate text-[13px] leading-5 text-text-secondary transition-colors duration-150 ease-out hover:text-text-strong"
         >
-          Unstaged
+          {status?.branch ?? "Unstaged"}
           <ChevronDownIcon width={14} height={14} />
         </button>
         <span className="flex items-center gap-1.5 font-mono text-[12px] leading-4 tabular-nums">
@@ -526,6 +642,14 @@ function ReviewTab({ files }: { files: DiffFile[] }) {
           </span>
         </span>
         <div className="ml-auto flex items-center gap-0.5">
+          {usingReal ? (
+            <HeaderIconButton
+              label="Refresh"
+              onClick={() => setNonce((n) => n + 1)}
+            >
+              <RefreshIcon width={16} height={16} />
+            </HeaderIconButton>
+          ) : null}
           <HeaderIconButton label="More">
             <DotsIcon width={16} height={16} />
           </HeaderIconButton>
@@ -537,38 +661,442 @@ function ReviewTab({ files }: { files: DiffFile[] }) {
 
       {/* File list */}
       <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">
-        {files.map((f) => (
-          <DiffRow key={f.path} file={f} />
-        ))}
+        {loading && files.length === 0 ? (
+          <p className="px-2 py-3 text-[12px] leading-4 text-text-faint">
+            Loading changes…
+          </p>
+        ) : error ? (
+          <p className="px-2 py-3 text-[12px] leading-4 text-text-faint">
+            Couldn&apos;t load changes.
+          </p>
+        ) : empty ? (
+          <p className="px-2 py-3 text-[12px] leading-4 text-text-faint">
+            No changes
+          </p>
+        ) : (
+          files.map((f) => (
+            <DiffRow
+              key={f.path}
+              file={f}
+              cwd={usingReal ? cwd : undefined}
+              open={openFile === f.path}
+              onToggle={() =>
+                setOpenFile((cur) => (cur === f.path ? null : f.path))
+              }
+            />
+          ))
+        )}
       </div>
     </div>
   );
 }
 
-function DiffRow({ file }: { file: DiffFile }) {
+function DiffRow({
+  file,
+  cwd,
+  open,
+  onToggle,
+}: {
+  file: DiffFile;
+  /** When set, clicking loads the file's diff via the git-diff endpoint. */
+  cwd?: string;
+  open?: boolean;
+  onToggle?: () => void;
+}) {
   const name = file.path.split("/").pop() ?? file.path;
+  const [diff, setDiff] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
+
+  // Lazily fetch the diff the first time this row is expanded (and re-fetch if
+  // the file/cwd changes while open).
+  useEffect(() => {
+    if (!open || !cwd) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(false);
+    setDiff(null);
+    api
+      .gitDiff(cwd, file.path)
+      .then((r) => {
+        if (!cancelled) setDiff(r.diff);
+      })
+      .catch(() => {
+        if (!cancelled) setError(true);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, cwd, file.path]);
+
   return (
-    <button
-      type="button"
-      className="flex h-8 w-full items-center gap-2 rounded-[8.4px] px-2 text-left transition-colors duration-150 ease-out hover:bg-bubble-bg"
-    >
-      <FileIcon width={16} height={16} className="shrink-0 icon-faint" />
-      <span className="min-w-0 flex-1 truncate text-sm leading-5 text-text-primary">
-        {name}
-      </span>
-      <span className="flex shrink-0 items-center gap-1.5 font-mono text-[12px] leading-4 tabular-nums">
-        {file.added > 0 ? (
-          <span className="text-[color:var(--diff-add,#16a34a)]">
-            +{file.added}
-          </span>
-        ) : null}
-        {file.removed > 0 ? (
-          <span className="text-[color:var(--diff-remove,#dc2626)]">
-            -{file.removed}
-          </span>
-        ) : null}
-      </span>
-    </button>
+    <div>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className={cx(
+          "flex h-8 w-full items-center gap-2 rounded-[8.4px] px-2 text-left transition-colors duration-150 ease-out hover:bg-bubble-bg",
+          open && "bg-bubble-bg",
+        )}
+      >
+        <FileIcon width={16} height={16} className="shrink-0 icon-faint" />
+        <span className="min-w-0 flex-1 truncate text-sm leading-5 text-text-primary">
+          {name}
+        </span>
+        <span className="flex shrink-0 items-center gap-1.5 font-mono text-[12px] leading-4 tabular-nums">
+          {file.added > 0 ? (
+            <span className="text-[color:var(--diff-add,#16a34a)]">
+              +{file.added}
+            </span>
+          ) : null}
+          {file.removed > 0 ? (
+            <span className="text-[color:var(--diff-remove,#dc2626)]">
+              -{file.removed}
+            </span>
+          ) : null}
+        </span>
+      </button>
+      {open && cwd ? (
+        <div className="px-2 pb-1">
+          {loading ? (
+            <p className="py-2 text-[12px] leading-4 text-text-faint">
+              Loading diff…
+            </p>
+          ) : error ? (
+            <p className="py-2 text-[12px] leading-4 text-text-faint">
+              Couldn&apos;t load diff.
+            </p>
+          ) : diff ? (
+            <DiffView diff={diff} />
+          ) : (
+            <p className="py-2 text-[12px] leading-4 text-text-faint">
+              No diff to show.
+            </p>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Minimal +/- diff renderer. Colors added/removed lines and dims hunk headers /
+ * file metadata. Kept simple and unable to throw — it just styles each line.
+ */
+function DiffView({ diff }: { diff: string }) {
+  const lines = diff.replace(/\n$/, "").split("\n");
+  return (
+    <pre className="overflow-x-auto rounded-[8.4px] border border-card-border bg-code-bg px-3 py-2 font-mono text-[12px] leading-5">
+      <code>
+        {lines.map((line, i) => {
+          const isMeta =
+            line.startsWith("diff ") ||
+            line.startsWith("index ") ||
+            line.startsWith("--- ") ||
+            line.startsWith("+++ ") ||
+            line.startsWith("new file") ||
+            line.startsWith("deleted file") ||
+            line.startsWith("similarity ") ||
+            line.startsWith("rename ");
+          const isHunk = line.startsWith("@@");
+          const isAdd = !isMeta && line.startsWith("+");
+          const isRemove = !isMeta && line.startsWith("-");
+          return (
+            <div
+              key={i}
+              className={cx(
+                "whitespace-pre",
+                isHunk && "text-text-secondary",
+                isMeta && "text-text-faint",
+                isAdd && "text-[color:var(--diff-add,#16a34a)]",
+                isRemove && "text-[color:var(--diff-remove,#dc2626)]",
+                !isHunk && !isMeta && !isAdd && !isRemove && "text-code-text",
+              )}
+            >
+              {line || " "}
+            </div>
+          );
+        })}
+      </code>
+    </pre>
+  );
+}
+
+/**
+ * Files tab: a lazily-expandable file tree. The root level is loaded when the
+ * tab activates; expanding a directory fetches its children (one level per
+ * call). Directories are listed before files. Clicking a file previews its
+ * content (respecting the server's `truncated` flag). With no cwd, an empty
+ * state is shown.
+ */
+function FilesTab({ cwd, active }: { cwd?: string; active: boolean }) {
+  const [selected, setSelected] = useState<string | null>(null);
+
+  // Reset the preview when switching directories.
+  useEffect(() => {
+    setSelected(null);
+  }, [cwd]);
+
+  if (!cwd) {
+    return (
+      <PlaceholderTab
+        Icon={FilesTabIcon}
+        title="No files"
+        hint="Open a session to browse its files."
+      />
+    );
+  }
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="min-h-0 flex-1 overflow-y-auto px-1 py-1">
+        <FileTreeLevel
+          cwd={cwd}
+          path=""
+          depth={0}
+          active={active}
+          selected={selected}
+          onSelectFile={setSelected}
+        />
+      </div>
+      {selected ? (
+        <div className="min-h-0 max-h-[45%] shrink-0 overflow-y-auto border-t border-panel-border">
+          <FilePreview cwd={cwd} path={selected} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * One directory level of the file tree. Fetches its entries via `api.files`.
+ * The root level (path === "") auto-loads; nested levels are only rendered when
+ * their parent row is expanded, so they load lazily on first expand.
+ */
+function FileTreeLevel({
+  cwd,
+  path,
+  depth,
+  active,
+  selected,
+  onSelectFile,
+}: {
+  cwd: string;
+  path: string;
+  depth: number;
+  active: boolean;
+  selected: string | null;
+  onSelectFile: (path: string) => void;
+}) {
+  const [entries, setEntries] = useState<FileEntry[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(false);
+    api
+      .files(cwd, path)
+      .then((list) => {
+        if (cancelled) return;
+        // Dirs first, then files, each alphabetical.
+        const sorted = [...list].sort((a, b) => {
+          if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
+        setEntries(sorted);
+      })
+      .catch(() => {
+        if (!cancelled) setError(true);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, path, active]);
+
+  if (loading && !entries) {
+    return (
+      <p
+        className="py-1 text-[12px] leading-4 text-text-faint"
+        style={{ paddingLeft: 8 + depth * 14 }}
+      >
+        Loading…
+      </p>
+    );
+  }
+  if (error) {
+    return (
+      <p
+        className="py-1 text-[12px] leading-4 text-text-faint"
+        style={{ paddingLeft: 8 + depth * 14 }}
+      >
+        Couldn&apos;t load.
+      </p>
+    );
+  }
+  if (entries && entries.length === 0) {
+    return (
+      <p
+        className="py-1 text-[12px] leading-4 text-text-faint"
+        style={{ paddingLeft: 8 + depth * 14 }}
+      >
+        Empty
+      </p>
+    );
+  }
+
+  return (
+    <div>
+      {entries?.map((entry) => (
+        <FileTreeNode
+          key={entry.path}
+          cwd={cwd}
+          entry={entry}
+          depth={depth}
+          selected={selected}
+          onSelectFile={onSelectFile}
+        />
+      ))}
+    </div>
+  );
+}
+
+function FileTreeNode({
+  cwd,
+  entry,
+  depth,
+  selected,
+  onSelectFile,
+}: {
+  cwd: string;
+  entry: FileEntry;
+  depth: number;
+  selected: string | null;
+  onSelectFile: (path: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const isDir = entry.type === "dir";
+  const isSelected = !isDir && selected === entry.path;
+  const pad = 8 + depth * 14;
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => (isDir ? setExpanded((v) => !v) : onSelectFile(entry.path))}
+        aria-expanded={isDir ? expanded : undefined}
+        className={cx(
+          "flex h-8 w-full items-center gap-1.5 rounded-[8.4px] pr-2 text-left transition-colors duration-150 ease-out hover:bg-bubble-bg",
+          isSelected && "bg-bubble-bg",
+        )}
+        style={{ paddingLeft: pad }}
+      >
+        {isDir ? (
+          <ChevronRightIcon
+            width={12}
+            height={12}
+            className={cx(
+              "shrink-0 icon-faint transition-transform duration-150 ease-out",
+              expanded && "rotate-90",
+            )}
+          />
+        ) : (
+          <span className="w-3 shrink-0" />
+        )}
+        {isDir ? (
+          expanded ? (
+            <FolderOpenIcon width={16} height={16} className="shrink-0 icon-muted" />
+          ) : (
+            <FolderIcon width={16} height={16} className="shrink-0 icon-muted" />
+          )
+        ) : (
+          <FileIcon width={16} height={16} className="shrink-0 icon-faint" />
+        )}
+        <span className="min-w-0 flex-1 truncate text-sm leading-5 text-text-primary">
+          {entry.name}
+        </span>
+      </button>
+      {isDir && expanded ? (
+        <FileTreeLevel
+          cwd={cwd}
+          path={entry.path}
+          depth={depth + 1}
+          active
+          selected={selected}
+          onSelectFile={onSelectFile}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+/** Preview of a selected file's content — reuses CodeBlock. */
+function FilePreview({ cwd, path }: { cwd: string; path: string }) {
+  const [content, setContent] = useState<string | null>(null);
+  const [truncated, setTruncated] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(false);
+    setContent(null);
+    api
+      .fileContent(cwd, path)
+      .then((r) => {
+        if (cancelled) return;
+        setContent(r.content);
+        setTruncated(r.truncated);
+      })
+      .catch(() => {
+        if (!cancelled) setError(true);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, path]);
+
+  const name = path.split("/").pop() ?? path;
+  const ext = name.includes(".") ? name.split(".").pop() : undefined;
+
+  return (
+    <div className="px-3 py-2">
+      <div className="flex items-center gap-1.5 pb-1">
+        <FileIcon width={14} height={14} className="shrink-0 icon-faint" />
+        <span className="min-w-0 flex-1 truncate text-[12px] leading-4 text-text-secondary">
+          {path}
+        </span>
+      </div>
+      {loading ? (
+        <p className="py-2 text-[12px] leading-4 text-text-faint">Loading…</p>
+      ) : error ? (
+        <p className="py-2 text-[12px] leading-4 text-text-faint">
+          Couldn&apos;t load file.
+        </p>
+      ) : content !== null ? (
+        <>
+          <CodeBlock code={content} lang={ext} />
+          {truncated ? (
+            <p className="pb-1 text-[12px] leading-4 text-text-faint">
+              File truncated — showing the beginning only.
+            </p>
+          ) : null}
+        </>
+      ) : null}
+    </div>
   );
 }
 

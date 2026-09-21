@@ -13,14 +13,8 @@
  */
 import { forwardRef } from "react";
 import { Menu, MenuItem, MenuSeparator } from "./ui/Menu";
-import {
-  DotsIcon,
-  ShareIcon,
-  CopyIcon,
-  ChevronRightIcon,
-  ClockIcon,
-  ExpandIcon,
-} from "../chat/components/icons";
+import { DotsIcon, CopyIcon, TrashIcon } from "../chat/components/icons";
+import { useSessionStore } from "@/stores";
 
 /** Muted keyboard-shortcut hint, right-aligned in a menu row's trailing slot. */
 function Shortcut({ keys }: { keys: string }) {
@@ -29,11 +23,6 @@ function Shortcut({ keys }: { keys: string }) {
       {keys}
     </span>
   );
-}
-
-/** Submenu affordance glyph (a plain chevron — real submenus are TODO). */
-function SubmenuArrow() {
-  return <ChevronRightIcon className="size-4 icon-faint" />;
 }
 
 /**
@@ -64,21 +53,32 @@ const MoreButton = forwardRef<HTMLButtonElement, Record<string, unknown>>(
 );
 
 export function SessionRowMenu({
-  title,
+  projectId,
+  sessionId,
+  pinned = false,
+  archived = false,
   triggerRef,
   open,
   onOpenChange,
+  onRename,
+  onCopyTitle,
 }: {
-  /** Session title, used only to make the console mock logs legible. */
-  title: string;
+  projectId: string;
+  sessionId: string;
+  pinned?: boolean;
+  archived?: boolean;
   /** Ref to the "…" trigger, so the row can open the menu on right-click. */
   triggerRef?: React.Ref<HTMLButtonElement>;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  /** Start the row's inline rename editor (the row owns the input). */
+  onRename?: () => void;
+  /** Copy the session title to the clipboard. */
+  onCopyTitle?: () => void;
 }) {
-  const act = (name: string) => () =>
-    // TODO: wire to real session actions
-    console.log(`[session menu] ${name}: ${title}`);
+  const setPinned = useSessionStore((s) => s.setPinned);
+  const setArchived = useSessionStore((s) => s.setArchived);
+  const deleteSession = useSessionStore((s) => s.deleteSession);
 
   return (
     <Menu
@@ -92,65 +92,43 @@ export function SessionRowMenu({
       <MenuItem
         label="Rename"
         trailing={<Shortcut keys="⌥⌘R" />}
-        onSelect={act("Rename")}
+        onSelect={() => onRename?.()}
       />
       <MenuItem
-        label="Pin"
+        label={pinned ? "Unpin" : "Pin"}
         trailing={<Shortcut keys="⌥⌘P" />}
-        onSelect={act("Pin")}
+        onSelect={() => setPinned(projectId, sessionId, !pinned)}
       />
       <MenuItem
-        label="Archive"
+        label={archived ? "Unarchive" : "Archive"}
         trailing={<Shortcut keys="⇧⌘A" />}
-        onSelect={act("Archive")}
+        onSelect={() => setArchived(projectId, sessionId, !archived)}
       />
 
       <MenuSeparator />
 
-      <MenuItem
-        icon={<ShareIcon width={16} height={16} />}
-        label="Share"
-        onSelect={act("Share")}
-      />
       <MenuItem
         icon={<CopyIcon width={16} height={16} />}
-        label="Copy"
-        trailing={<SubmenuArrow />}
-        closeOnClick={false}
-        onSelect={act("Copy")}
+        label="Copy title"
+        onSelect={() => onCopyTitle?.()}
       />
 
       <MenuSeparator />
 
       <MenuItem
-        label="New side chat"
-        trailing={<Shortcut keys="⌥⌘S" />}
-        onSelect={act("New side chat")}
-      />
-      <MenuItem
-        label="Fork"
-        trailing={<SubmenuArrow />}
-        closeOnClick={false}
-        onSelect={act("Fork")}
-      />
-      <MenuItem
-        icon={<ClockIcon width={16} height={16} />}
-        label="Add scheduled task…"
-        onSelect={act("Add scheduled task")}
-      />
-
-      <MenuSeparator />
-
-      <MenuItem
-        label="Open in"
-        trailing={<SubmenuArrow />}
-        closeOnClick={false}
-        onSelect={act("Open in")}
-      />
-      <MenuItem
-        icon={<ExpandIcon width={16} height={16} />}
-        label="Open in new window"
-        onSelect={act("Open in new window")}
+        icon={<TrashIcon width={16} height={16} />}
+        label="Delete"
+        accent
+        onSelect={() => {
+          if (
+            typeof window !== "undefined" &&
+            window.confirm(
+              "Delete this chat? Its transcript is moved to the trash folder.",
+            )
+          ) {
+            deleteSession(projectId, sessionId);
+          }
+        }}
       />
     </Menu>
   );
