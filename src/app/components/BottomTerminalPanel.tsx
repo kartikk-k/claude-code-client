@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { TerminalTabIcon, AddTabIcon, XIcon } from "../chat/components/icons";
 import { Tooltip } from "./ui/Tooltip";
+import { TerminalView } from "./TerminalView";
 import {
   useChatLayout,
   useUiStore,
@@ -158,19 +159,10 @@ export function BottomTerminalPanel({
           </Tooltip>
         </div>
 
-        {/* Terminal body */}
-        <div className="min-h-0 flex-1 overflow-y-auto bg-code-bg px-3 py-2 font-mono text-[12.5px] leading-5">
-          <div className="text-text-secondary">
-            <span className="text-text-strong">
-              {dir === "~" ? "~" : `…/${tabName}`}
-            </span>
-            <span className="text-text-faint"> %</span>{" "}
-            <span className="text-[color:var(--switch-on)]">ls</span>
-          </div>
-          <div className="mt-1 flex items-center text-text-strong">
-            <span className="text-text-faint">{`${tabName} %`}</span>
-            <span className="ml-2 inline-block h-4 w-[7px] animate-pulse bg-text-faint" />
-          </div>
+        {/* Live terminal — real shell in the session's working directory.
+            Remounts (via key=cwd) when the active chat's cwd changes. */}
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {open ? <TerminalView key={cwd ?? "~"} cwd={cwd} /> : null}
         </div>
       </div>
     </div>

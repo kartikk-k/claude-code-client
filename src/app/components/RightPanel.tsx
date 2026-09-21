@@ -23,9 +23,12 @@ import {
   BottomPanelClosedIcon,
 } from "../chat/components/icons";
 import { Tooltip } from "./ui/Tooltip";
+import { Menu, MenuItem } from "./ui/Menu";
 import { CodeBlock } from "./blocks/CodeBlock";
+import { TerminalView } from "./TerminalView";
+import { BrowserTab } from "./BrowserTab";
 import { api, type GitStatus, type GitFile, type FileEntry } from "../lib/api";
-import { useChatLayout, useUiStore } from "@/stores";
+import { useChatLayout, useUiStore, type OpenTab, type RightTab } from "@/stores";
 
 /**
  * A single changed file in the Review tab. Kept intentionally small and
@@ -38,22 +41,25 @@ export type DiffFile = {
   kind?: string;
 };
 
-/** The set of openable tabs. `'none'` renders the empty tab-list state.
- *  `'preview'` is dynamic — shown only when an attachment is opened. */
-type TabId =
-  | "none"
-  | "review"
-  | "terminal"
-  | "browser"
-  | "files"
-  | "sidechat"
-  | "preview";
+/** The set of tab kinds. `'none'` renders the empty tab-list state.
+ *  `'preview'` is dynamic — shown only when an attachment is opened. Mirrors
+ *  `RightTab` from the ui store. */
+type TabId = RightTab;
+
+/** A tab kind that can appear as an actual open tab (everything but `none`). */
+type TabKind = Exclude<RightTab, "none">;
+
+/** Kinds the picker lets you open. `preview` is opened programmatically only. */
+type PickerKind = Exclude<TabKind, "preview">;
+
+/** Kinds that may have MULTIPLE simultaneous instances; all others are unique. */
+const MULTI_INSTANCE: ReadonlySet<TabKind> = new Set(["browser", "terminal"]);
 
 /** A file opened for preview in the right panel (from a composer attachment). */
 export type PreviewFile = { name: string; url: string; mime: string };
 
 type TabDef = {
-  id: Exclude<TabId, "none">;
+  id: PickerKind;
   label: string;
   shortcut: string;
   Icon: (p: React.SVGProps<SVGSVGElement> & { size?: number }) => React.ReactElement;
@@ -66,6 +72,23 @@ const TABS: TabDef[] = [
   { id: "files", label: "Files", shortcut: "⌘P", Icon: FilesTabIcon },
   { id: "sidechat", label: "Side chat", shortcut: "⌥⌘S", Icon: SideChatTabIcon },
 ];
+
+/** Icon + short label for any tab kind — drives header chips and preview. */
+function tabMeta(
+  kind: TabKind,
+): {
+  label: string;
+  Icon: (p: React.SVGProps<SVGSVGElement> & { size?: number }) => React.ReactElement;
+} {
+  if (kind === "preview") return { label: "Preview", Icon: FileIcon };
+  const def = TABS.find((t) => t.id === kind);
+  return { label: def?.label ?? "", Icon: def?.Icon ?? ReviewIcon };
+}
+
+/** Create a reasonably-unique tab id (SSR-safe — no crypto/window at module scope). */
+function newTabId(kind: TabKind): string {
+  return `${kind}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
 
 const MIN_WIDTH = 320;
 const MAX_WIDTH = 640;
@@ -127,36 +150,127 @@ export function RightPanel({
   const layout = useChatLayout(sessionId);
   const patchLayout = useUiStore((s) => s.patchLayout);
 
-  const [tab, setTabState] = useState<TabId>(layout.rightTab ?? defaultTab);
+  // Multi-tab model: a list of open tabs + the active tab id. Seeded from the
+  // per-chat layout; every mutation is committed back so it persists per chat.
+  const [openTabs, setOpenTabs] = useState<OpenTab[]>(
+    layout.openTabs ?? [],
+  );
+  const [activeTabId, setActiveTabId] = useState<string | null>(
+    layout.activeTabId ?? null,
+  );
   const [width, setWidth] = useState<number>(layout.rightWidth ?? DEFAULT_WIDTH);
   const [dragging, setDragging] = useState(false);
   const [fullWidth, setFullWidth] = useState(false);
   const dragState = useRef<{ startX: number; startWidth: number } | null>(null);
 
-  // Re-seed local width + tab when the active chat changes (its saved layout).
+  // Re-seed local width + tabs when the active chat changes (its saved layout).
   useEffect(() => {
     setWidth(layout.rightWidth ?? DEFAULT_WIDTH);
-    setTabState(layout.rightTab ?? defaultTab);
+    setOpenTabs(layout.openTabs ?? []);
+    setActiveTabId(layout.activeTabId ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  // Set the tab AND persist it for this chat.
-  const setTab = useCallback(
-    (next: TabId) => {
-      setTabState(next);
-      patchLayout(sessionId, { rightTab: next });
+  // Persist a new tab set + active id for this chat.
+  const commitTabs = useCallback(
+    (tabs: OpenTab[], active: string | null) => {
+      setOpenTabs(tabs);
+      setActiveTabId(active);
+      patchLayout(sessionId, { openTabs: tabs, activeTabId: active });
     },
     [patchLayout, sessionId],
   );
 
-  // When a file is opened from the composer, jump to the Preview tab (and make
-  // sure the panel is open). Keyed on url so a new/re-opened file re-triggers.
+  // Open (or focus) a tab of the given kind. Unique kinds focus an existing tab;
+  // browser/terminal always spawn a fresh instance. Returns the active id.
+  const openTab = useCallback(
+    (kind: TabKind, opts?: { url?: string; makeActive?: boolean }) => {
+      setOpenTabs((prev) => {
+        const existing = !MULTI_INSTANCE.has(kind)
+          ? prev.find((t) => t.kind === kind)
+          : undefined;
+        if (existing) {
+          setActiveTabId(existing.id);
+          patchLayout(sessionId, { openTabs: prev, activeTabId: existing.id });
+          return prev;
+        }
+        const tab: OpenTab = { id: newTabId(kind), kind, url: opts?.url };
+        const next = [...prev, tab];
+        setActiveTabId(tab.id);
+        patchLayout(sessionId, { openTabs: next, activeTabId: tab.id });
+        return next;
+      });
+    },
+    [patchLayout, sessionId],
+  );
+
+  // Focus an already-open tab.
+  const focusTab = useCallback(
+    (id: string) => {
+      setActiveTabId(id);
+      patchLayout(sessionId, { activeTabId: id });
+    },
+    [patchLayout, sessionId],
+  );
+
+  // Close a tab. If it was active, fall back to the previous tab (or the empty
+  // tab-list state when none remain).
+  const closeTab = useCallback(
+    (id: string) => {
+      setOpenTabs((prev) => {
+        const idx = prev.findIndex((t) => t.id === id);
+        if (idx === -1) return prev;
+        const next = prev.filter((t) => t.id !== id);
+        setActiveTabId((curActive) => {
+          let nextActive = curActive;
+          if (curActive === id) {
+            const fallback = next[idx - 1] ?? next[idx] ?? next[next.length - 1];
+            nextActive = fallback?.id ?? null;
+          }
+          patchLayout(sessionId, { openTabs: next, activeTabId: nextActive });
+          return nextActive;
+        });
+        return next;
+      });
+    },
+    [patchLayout, sessionId],
+  );
+
+  // Update a browser tab's persisted url.
+  const setTabUrl = useCallback(
+    (id: string, url: string) => {
+      setOpenTabs((prev) => {
+        const next = prev.map((t) => (t.id === id ? { ...t, url } : t));
+        patchLayout(sessionId, { openTabs: next });
+        return next;
+      });
+    },
+    [patchLayout, sessionId],
+  );
+
+  // Seed a tab from `defaultTab` when there are no persisted tabs yet.
+  useEffect(() => {
+    if (
+      (layout.openTabs?.length ?? 0) === 0 &&
+      defaultTab &&
+      defaultTab !== "none" &&
+      defaultTab !== "preview"
+    ) {
+      openTab(defaultTab);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // When a file is opened from the composer, open/focus the Preview tab (and
+  // make sure the panel is open). Keyed on url so a re-opened file re-triggers.
   useEffect(() => {
     if (!previewFile) return;
-    setTab("preview");
+    openTab("preview");
     if (!open) onOpenChange?.(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [previewFile?.url]);
+
+  const activeTab = openTabs.find((t) => t.id === activeTabId) ?? null;
 
   const collapse = () => onOpenChange?.(false);
   const toggleFullWidth = () => {
@@ -197,8 +311,6 @@ export function RightPanel({
     },
     [width, onPointerMove, onPointerUp],
   );
-
-  const activeTab = TABS.find((t) => t.id === tab);
 
   // Collapse (open→false) animates the panel's width to 0 so it slides out.
   // Full-width expand animates flex-grow 0→1 (paired with the shell's chat
@@ -264,9 +376,9 @@ export function RightPanel({
         />
       </button>
 
-      {tab === "none" ? (
+      {openTabs.length === 0 ? (
         <TabListEmptyState
-          onOpen={setTab}
+          onOpen={(id) => openTab(id)}
           onCollapse={collapse}
           bottomPanelOpen={bottomPanelOpen}
           onToggleBottom={onToggleBottomPanel}
@@ -275,76 +387,61 @@ export function RightPanel({
       ) : (
         <>
           <PanelHeader
-            label={
-              tab === "preview"
-                ? (previewFile?.name ?? "Preview")
-                : (activeTab?.label ?? "")
-            }
-            Icon={tab === "preview" ? FileIcon : (activeTab?.Icon ?? ReviewIcon)}
-            onClose={() => setTab("none")}
+            tabs={openTabs}
+            activeTabId={activeTabId}
+            previewName={previewFile?.name}
+            onSelectTab={focusTab}
+            onCloseTab={closeTab}
+            onOpenKind={(id) => openTab(id)}
             onCollapse={collapse}
             bottomPanelOpen={bottomPanelOpen}
             onToggleBottom={onToggleBottomPanel}
             onExpandFull={toggleFullWidth}
           />
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            {tab === "review" ? (
-              <ReviewTab cwd={cwd} active={tab === "review"} fallback={diffFiles} />
-            ) : tab === "terminal" ? (
-              <TerminalPane cwd={cwd} />
-            ) : tab === "browser" ? (
-              <PlaceholderTab
-                Icon={GlobeIcon}
-                title="Browser"
-                hint="No page open."
-              />
-            ) : tab === "files" ? (
-              <FilesTab cwd={cwd} active={tab === "files"} />
-            ) : tab === "preview" ? (
-              <PreviewTab file={previewFile} />
-            ) : (
-              <PlaceholderTab
-                Icon={SideChatTabIcon}
-                title="Start a side chat"
-                hint="Ask a question without disrupting the main thread."
-              />
-            )}
+          <div className="relative min-h-0 flex-1">
+            {openTabs.map((t) => {
+              const isActive = t.id === activeTabId;
+              return (
+                <div
+                  key={t.id}
+                  // Keep every open tab mounted (so terminals/browsers keep their
+                  // sockets + page state); only the active one is visible.
+                  className={cx(
+                    "absolute inset-0 min-h-0",
+                    t.kind === "terminal" || t.kind === "browser"
+                      ? "overflow-hidden"
+                      : "overflow-y-auto",
+                    isActive ? "block" : "hidden",
+                  )}
+                >
+                  {t.kind === "review" ? (
+                    <ReviewTab cwd={cwd} active={isActive} fallback={diffFiles} />
+                  ) : t.kind === "terminal" ? (
+                    <TerminalView cwd={cwd} />
+                  ) : t.kind === "browser" ? (
+                    <BrowserTab
+                      url={t.url}
+                      onUrlChange={(url) => setTabUrl(t.id, url)}
+                    />
+                  ) : t.kind === "files" ? (
+                    <FilesTab cwd={cwd} active={isActive} />
+                  ) : t.kind === "preview" ? (
+                    <PreviewTab file={previewFile} />
+                  ) : (
+                    <PlaceholderTab
+                      Icon={SideChatTabIcon}
+                      title="Start a side chat"
+                      hint="Ask a question without disrupting the main thread."
+                    />
+                  )}
+                </div>
+              );
+            })}
           </div>
         </>
       )}
       </div>
     </aside>
-  );
-}
-
-/**
- * Terminal placeholder — shows the working directory it would open in (the
- * active session's cwd). For now it renders the prompt line so the layout and
- * directory are visible.
- *
- * NOTE: The PTY backend exists at ws://localhost:4317/api/pty?cwd=<cwd>, but
- * node-pty output does not flow under Bun yet, so live terminal streaming
- * (xterm wiring) is intentionally deferred pending backend (Bun/node-pty)
- * support. Leaving this as a static prompt placeholder until then.
- */
-function TerminalPane({ cwd, compact }: { cwd?: string; compact?: boolean }) {
-  const dir = cwd || "~";
-  return (
-    <div
-      className={cx(
-        "flex h-full min-h-0 flex-col overflow-y-auto bg-code-bg px-3 font-mono text-[12px] leading-5",
-        compact ? "py-2" : "py-3",
-      )}
-    >
-      <div className="text-text-secondary">
-        <span className="text-[color:var(--agent-accent)]">➜</span>{" "}
-        <span className="text-text-strong">{dir}</span>
-      </div>
-      <div className="mt-1 flex items-center text-text-strong">
-        <span className="text-[color:var(--agent-accent)]">➜</span>
-        <span className="ml-2 inline-block h-4 w-2 animate-pulse bg-text-faint" />
-      </div>
-    </div>
   );
 }
 
@@ -360,7 +457,7 @@ function TabListEmptyState({
   onToggleBottom,
   onExpandFull,
 }: {
-  onOpen: (id: TabId) => void;
+  onOpen: (id: PickerKind) => void;
   onCollapse: () => void;
   bottomPanelOpen?: boolean;
   onToggleBottom?: () => void;
@@ -414,21 +511,30 @@ function TabListEmptyState({
 }
 
 /**
- * h-11 header: the active tab rendered as a chip (icon + label + close) with a
- * "+" add-tab button, then a single sidebar control that collapses the panel.
+ * h-11 header: a horizontal strip of tab chips (icon + short label + close),
+ * the active one highlighted, plus a "+" button that opens the same tab-list
+ * picker the empty state shows. On the right: expand-full / bottom-panel toggle
+ * / collapse.
  */
 function PanelHeader({
-  label,
-  Icon,
-  onClose,
+  tabs,
+  activeTabId,
+  previewName,
+  onSelectTab,
+  onCloseTab,
+  onOpenKind,
   onCollapse,
   bottomPanelOpen,
   onToggleBottom,
   onExpandFull,
 }: {
-  label: string;
-  Icon: (p: React.SVGProps<SVGSVGElement> & { size?: number }) => React.ReactElement;
-  onClose: () => void;
+  tabs: OpenTab[];
+  activeTabId: string | null;
+  /** Name shown on the preview chip, if a preview tab is open. */
+  previewName?: string;
+  onSelectTab: (id: string) => void;
+  onCloseTab: (id: string) => void;
+  onOpenKind: (kind: PickerKind) => void;
   onCollapse: () => void;
   bottomPanelOpen?: boolean;
   onToggleBottom?: () => void;
@@ -436,29 +542,60 @@ function PanelHeader({
 }) {
   return (
     <div className="flex h-11 shrink-0 items-center gap-1 border-b border-panel-border px-2">
-      {/* Active tab chip */}
-      <div className="flex h-8 items-center gap-2 rounded-[10px] bg-bubble-bg px-2.5">
-        <Icon width={16} height={16} className="shrink-0 icon-muted" />
-        <span className="text-[13px] font-medium leading-5 text-text-strong">
-          {label}
-        </span>
-        <button
-          type="button"
-          aria-label="Close tab"
-          onClick={onClose}
-          className="-mr-0.5 flex size-5 items-center justify-center rounded-full text-text-secondary transition-colors duration-150 ease-out hover:bg-nav-active-bg hover:text-text-strong"
-        >
-          <XIcon width={14} height={14} />
-        </button>
+      {/* Tab strip */}
+      <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+        {tabs.map((t) => {
+          const { label, Icon } = tabMeta(t.kind);
+          const chipLabel = t.kind === "preview" ? (previewName ?? label) : label;
+          const isActive = t.id === activeTabId;
+          return (
+            <div
+              key={t.id}
+              className={cx(
+                "group flex h-8 shrink-0 items-center gap-1.5 rounded-[10px] pl-2.5 pr-1.5 transition-colors duration-150 ease-out",
+                isActive
+                  ? "bg-bubble-bg"
+                  : "hover:bg-bubble-bg/60",
+              )}
+            >
+              <button
+                type="button"
+                onClick={() => onSelectTab(t.id)}
+                className="flex min-w-0 items-center gap-2"
+              >
+                <Icon
+                  width={16}
+                  height={16}
+                  className={cx(
+                    "shrink-0",
+                    isActive ? "icon-muted" : "icon-faint",
+                  )}
+                />
+                <span
+                  className={cx(
+                    "max-w-[120px] truncate text-[13px] font-medium leading-5",
+                    isActive ? "text-text-strong" : "text-text-secondary",
+                  )}
+                >
+                  {chipLabel}
+                </span>
+              </button>
+              <button
+                type="button"
+                aria-label="Close tab"
+                onClick={() => onCloseTab(t.id)}
+                className="flex size-5 items-center justify-center rounded-full text-text-secondary opacity-60 transition-[opacity,background-color,color] duration-150 ease-out hover:bg-nav-active-bg hover:text-text-strong hover:opacity-100 group-hover:opacity-100"
+              >
+                <XIcon width={14} height={14} />
+              </button>
+            </div>
+          );
+        })}
+        {/* Add tab — opens the picker menu */}
+        <AddTabMenu onOpenKind={onOpenKind} />
       </div>
-      {/* Add tab */}
-      <Tooltip label="New tab" shortcut="⌘T" side="bottom">
-        <HeaderIconButton label="New tab">
-          <AddTabIcon width={18} height={18} />
-        </HeaderIconButton>
-      </Tooltip>
 
-      <div className="ml-auto flex items-center gap-0.5">
+      <div className="ml-auto flex shrink-0 items-center gap-0.5">
         <Tooltip label="Expand to full width" side="bottom">
           <HeaderIconButton label="Expand to full width" onClick={onExpandFull}>
             <ExpandFullIcon width={18} height={18} />
@@ -472,6 +609,39 @@ function PanelHeader({
         </Tooltip>
       </div>
     </div>
+  );
+}
+
+/**
+ * The "+" add-tab control. Opens a menu with the SAME picker options the empty
+ * state lists (Review / Terminal / Browser / Files / Side chat). Selecting one
+ * opens (or focuses) a tab of that kind.
+ */
+function AddTabMenu({
+  onOpenKind,
+}: {
+  onOpenKind: (kind: PickerKind) => void;
+}) {
+  return (
+    <Menu
+      side="bottom"
+      align="start"
+      trigger={
+        <HeaderIconButton label="New tab">
+          <AddTabIcon width={18} height={18} />
+        </HeaderIconButton>
+      }
+    >
+      {TABS.map(({ id, label, shortcut, Icon }) => (
+        <MenuItem
+          key={id}
+          icon={<Icon width={16} height={16} />}
+          label={label}
+          description={shortcut}
+          onSelect={() => onOpenKind(id)}
+        />
+      ))}
+    </Menu>
   );
 }
 

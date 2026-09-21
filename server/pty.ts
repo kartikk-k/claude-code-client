@@ -1,5 +1,14 @@
 /**
- * Real terminal over a Bun WebSocket, backed by node-pty.
+ * Terminal over a Bun WebSocket, backed by a persistent interactive shell.
+ *
+ * A true PTY isn't available here (node-pty doesn't build under Bun, and
+ * `script` needs a TTY on its own stdin which spawn can't provide), so we run
+ * the login shell (`-i`) with piped stdio. Shell state (cwd, env, aliases)
+ * persists across commands — real `ls`/`git`/`npm`/scripts work. Two gaps from
+ * a true TTY are papered over: output LF is translated to CRLF (so multi-line
+ * output doesn't stair-step in xterm), and the CLIENT echoes keystrokes locally
+ * (a piped shell can't). Tab-completion and full raw-mode TUIs (vim) need a real
+ * TTY and aren't supported.
  *
  * Wire-up (see index.ts): hono/bun's `createBunWebSocket()` gives us
  *   - `upgradeWebSocket` — the handler mounted at GET /api/pty
@@ -7,106 +16,116 @@
  *
  * Protocol:
  *   connect: ws://localhost:4317/api/pty?cwd=<cwd>&cols=<n>&rows=<n>
- *   server → client: raw pty output as text frames
- *   client → server: keystrokes as text frames; a JSON control frame
- *                    {"type":"resize","cols":N,"rows":N} resizes the pty.
- *   ws close → pty is killed.
- *
- * node-pty ships a native binding; if it fails to load under Bun we degrade:
- * PTY_AVAILABLE is false and the route returns 501 instead of crashing.
+ *   server → client: shell output as text frames (LF→CRLF translated)
+ *   client → server: completed command LINES (client does local echo/editing);
+ *                    a JSON {"type":"resize",...} frame is accepted + ignored.
+ *   ws close → the shell is killed.
  */
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { WSContext } from "hono/ws";
 
-// Lazily probe node-pty so a native-load failure never crashes the server.
-let ptyMod: typeof import("node-pty") | null = null;
-export let PTY_AVAILABLE = false;
-try {
-  // Synchronous require keeps startup simple; this file is imported once.
-  ptyMod = require("node-pty");
-  PTY_AVAILABLE = typeof ptyMod?.spawn === "function";
-} catch (err) {
-  console.warn(
-    `[claude-client] node-pty unavailable, /api/pty disabled: ${String(err)}`
-  );
-}
+// This shell-based terminal has no native dependency, so it is always available.
+export const PTY_AVAILABLE = true;
 
-type PtyProc = ReturnType<NonNullable<typeof ptyMod>["spawn"]>;
-
-// Track the pty per live socket so message/close handlers can reach it.
-const sockets = new WeakMap<object, PtyProc>();
+// Track the child PTY per live socket so message/close handlers can reach it.
+const shells = new WeakMap<object, ChildProcessWithoutNullStreams>();
 
 /** Build the hono `upgradeWebSocket` events for a given request context. */
 export function ptyEvents(cwd: string, cols: number, rows: number) {
   return {
     onOpen(_evt: Event, ws: WSContext) {
-      if (!PTY_AVAILABLE || !ptyMod) {
-        ws.close(1011, "pty unavailable");
-        return;
-      }
       const shell = process.env.SHELL || "/bin/zsh";
-      let proc: PtyProc;
+      const dir = cwd || process.env.HOME || process.cwd();
+      let child: ChildProcessWithoutNullStreams;
       try {
-        proc = ptyMod.spawn(shell, [], {
-          name: "xterm-color",
-          cwd: cwd || process.env.HOME || process.cwd(),
-          cols: cols || 80,
-          rows: rows || 24,
-          env: process.env as Record<string, string>,
+        child = spawn(shell, ["-i"], {
+          cwd: dir,
+          env: {
+            ...process.env,
+            TERM: "xterm-256color",
+            PAGER: "cat",
+            GIT_PAGER: "cat",
+            COLUMNS: String(cols || 80),
+            LINES: String(rows || 24),
+          },
         });
       } catch (err) {
-        ws.close(1011, `spawn failed: ${String(err)}`);
+        ws.close(1011, `terminal spawn failed: ${String(err)}`);
         return;
       }
-      sockets.set(ws.raw as object, proc);
-      // pty output → ws
-      proc.onData((data: string) => {
+      shells.set(ws.raw as object, child);
+
+      // Shell output → client. The shell has piped stdio (not a TTY), so it
+      // emits Unix "\n"; xterm needs "\r\n" to return the cursor to column 0
+      // (otherwise multi-line output stair-steps). Translate LF→CRLF here.
+      const forward = (buf: Buffer) => {
         try {
-          ws.send(data);
+          const text = buf
+            .toString("utf8")
+            // zsh prints a reverse-video "%" + a run of spaces then a CR to mark
+            // output that lacked a trailing newline. We render plain text, so
+            // drop that whole marker line.
+            .replace(/%\s{2,}\r?/g, "")
+            // LF→CRLF so multi-line output doesn't stair-step in xterm.
+            .replace(/\r?\n/g, "\r\n");
+          ws.send(text);
         } catch {
           /* socket gone */
         }
-      });
-      // pty exit → close the socket
-      proc.onExit(() => {
+      };
+      child.stdout.on("data", forward);
+      child.stderr.on("data", forward);
+      child.on("close", (code) => {
         try {
-          ws.close(1000, "pty exited");
+          ws.send(`\r\n\x1b[90m[process exited: ${code ?? 0}]\x1b[0m\r\n`);
+          ws.close(1000, "terminal exited");
         } catch {
           /* already closed */
+        }
+      });
+      child.on("error", (err) => {
+        try {
+          ws.send(`\r\n\x1b[31m[terminal error: ${String(err)}]\x1b[0m\r\n`);
+        } catch {
+          /* ignore */
         }
       });
     },
 
     onMessage(evt: MessageEvent, ws: WSContext) {
-      const proc = sockets.get(ws.raw as object);
-      if (!proc) return;
+      const child = shells.get(ws.raw as object);
+      if (!child) return;
       const data =
         typeof evt.data === "string"
           ? evt.data
           : Buffer.from(evt.data as ArrayBuffer).toString("utf8");
-      // A well-formed JSON control frame resizes; anything else is keystrokes.
+      // Resize control frames are accepted; we can't ioctl the script PTY, so
+      // we just export COLUMNS/LINES is not retroactive — best-effort no-op.
       if (data.startsWith("{")) {
         try {
           const msg = JSON.parse(data);
-          if (msg && msg.type === "resize") {
-            proc.resize(Number(msg.cols) || 80, Number(msg.rows) || 24);
-            return;
-          }
+          if (msg && msg.type === "resize") return;
         } catch {
-          /* not a control frame — fall through to write */
+          /* not a control frame — fall through to write raw keystrokes */
         }
       }
-      proc.write(data);
+      // Raw keystrokes straight to the PTY — it echoes + line-edits + completes.
+      try {
+        child.stdin.write(data);
+      } catch {
+        /* stdin closed */
+      }
     },
 
     onClose(_evt: CloseEvent, ws: WSContext) {
-      const proc = sockets.get(ws.raw as object);
-      if (proc) {
+      const child = shells.get(ws.raw as object);
+      if (child) {
         try {
-          proc.kill();
+          child.kill();
         } catch {
           /* already dead */
         }
-        sockets.delete(ws.raw as object);
+        shells.delete(ws.raw as object);
       }
     },
   };

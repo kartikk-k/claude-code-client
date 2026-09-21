@@ -33,7 +33,7 @@ export {
   BOTTOM_MAX_HEIGHT,
   BOTTOM_DEFAULT_HEIGHT,
 } from "./ui.store";
-export type { RightTab, ChatLayout, DraftAttachment } from "./ui.store";
+export type { RightTab, ChatLayout, DraftAttachment, OpenTab } from "./ui.store";
 
 import { useUiStore } from "./ui.store";
 import { useSessionStore } from "./session.store";

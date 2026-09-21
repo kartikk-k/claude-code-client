@@ -31,10 +31,26 @@ export type RightTab =
 /** A composer image attachment, persisted as a data/URL string + name. */
 export type DraftAttachment = { id: string; url: string; name: string };
 
+/**
+ * A single open right-panel tab. `kind` is the tab type (review/terminal/…);
+ * `url` is only meaningful for browser tabs (the current page). Preview tabs
+ * carry no persisted url — the previewed file lives in transient panel state.
+ */
+export type OpenTab = {
+  id: string;
+  kind: Exclude<RightTab, "none">;
+  url?: string;
+};
+
 /** Everything a single chat remembers about its workspace. */
 export type ChatLayout = {
   rightWidth: number;
+  /** @deprecated Kept for back-compat with v1 layouts; superseded by openTabs. */
   rightTab: RightTab;
+  /** The set of open right-panel tabs (multi-tab model). */
+  openTabs: OpenTab[];
+  /** The active tab's id, or null when the empty tab-list state is shown. */
+  activeTabId: string | null;
   bottomHeight: number;
   draft: string;
   attachments: DraftAttachment[];
@@ -50,6 +66,8 @@ export const BOTTOM_DEFAULT_HEIGHT = 260;
 export const DEFAULT_CHAT_LAYOUT: ChatLayout = {
   rightWidth: RIGHT_DEFAULT_WIDTH,
   rightTab: "none",
+  openTabs: [],
+  activeTabId: null,
   bottomHeight: BOTTOM_DEFAULT_HEIGHT,
   draft: "",
   attachments: [],
@@ -151,7 +169,39 @@ export const useUiStore = create<UiState>()(
     }),
     {
       name: "claude-client:ui",
-      version: 1,
+      version: 2,
+      // v1 → v2: introduce the multi-tab model. Old layouts stored a single
+      // `rightTab`; seed `openTabs`/`activeTabId` from it (a non-"none" tab
+      // becomes one open tab) so existing localStorage upgrades without a crash.
+      migrate: (persisted, version) => {
+        const state = persisted as { chatLayout?: Record<string, ChatLayout> };
+        if (!state || typeof state !== "object" || !state.chatLayout) {
+          return persisted as UiState;
+        }
+        if (version < 2) {
+          const migrated: Record<string, ChatLayout> = {};
+          for (const [key, raw] of Object.entries(state.chatLayout)) {
+            const layout = raw as Partial<ChatLayout> & { rightTab?: RightTab };
+            if (Array.isArray(layout.openTabs)) {
+              migrated[key] = layout as ChatLayout;
+              continue;
+            }
+            const prevTab = layout.rightTab ?? "none";
+            const openTabs: OpenTab[] =
+              prevTab && prevTab !== "none" && prevTab !== "preview"
+                ? [{ id: `${prevTab}-migrated`, kind: prevTab }]
+                : [];
+            migrated[key] = {
+              ...DEFAULT_CHAT_LAYOUT,
+              ...layout,
+              openTabs,
+              activeTabId: openTabs[0]?.id ?? null,
+            };
+          }
+          state.chatLayout = migrated;
+        }
+        return state as UiState;
+      },
     },
   ),
 );
