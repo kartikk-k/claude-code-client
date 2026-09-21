@@ -1,89 +1,88 @@
 /**
- * Terminal over a Bun WebSocket, backed by a persistent interactive shell.
+ * Real terminal over a Bun WebSocket, backed by a genuine pseudo-terminal.
  *
- * A true PTY isn't available here (node-pty doesn't build under Bun, and
- * `script` needs a TTY on its own stdin which spawn can't provide), so we run
- * the login shell (`-i`) with piped stdio. Shell state (cwd, env, aliases)
- * persists across commands — real `ls`/`git`/`npm`/scripts work. Two gaps from
- * a true TTY are papered over: output LF is translated to CRLF (so multi-line
- * output doesn't stair-step in xterm), and the CLIENT echoes keystrokes locally
- * (a piped shell can't). Tab-completion and full raw-mode TUIs (vim) need a real
- * TTY and aren't supported.
+ * The Bun runtime can't load node-pty's native binding, so we run a tiny Node
+ * subprocess (`pty-bridge.cjs`) that owns the real PTY and relays it over its
+ * own stdio. Bun ↔ Node bridge ↔ PTY ↔ shell. Because it's a real TTY the shell
+ * echoes, colorizes (`ls --color`), does tab completion, arrow-key history and
+ * emits proper control sequences — the client's xterm.js renders it all. We
+ * forward raw keystrokes in and raw bytes out; no local echo / line discipline.
  *
  * Wire-up (see index.ts): hono/bun's `createBunWebSocket()` gives us
  *   - `upgradeWebSocket` — the handler mounted at GET /api/pty
  *   - `websocket`        — the Bun socket handler exported on the server object
  *
- * Protocol:
+ * Protocol (client ↔ this server):
  *   connect: ws://localhost:4317/api/pty?cwd=<cwd>&cols=<n>&rows=<n>
- *   server → client: shell output as text frames (LF→CRLF translated)
- *   client → server: completed command LINES (client does local echo/editing);
- *                    a JSON {"type":"resize",...} frame is accepted + ignored.
- *   ws close → the shell is killed.
+ *   server → client: raw PTY output as text frames (xterm renders ANSI)
+ *   client → server: raw keystrokes as text frames; a JSON control frame
+ *                    {"type":"resize","cols","rows"} resizes the PTY.
+ *   ws close → the bridge (and its PTY/shell) is killed.
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import type { WSContext } from "hono/ws";
 
-// This shell-based terminal has no native dependency, so it is always available.
+const HERE = dirname(fileURLToPath(import.meta.url));
+const BRIDGE = join(HERE, "pty-bridge.cjs");
+// Prefer an explicit node; fall back to `node` on PATH.
+const NODE_BIN = process.env.NODE_BIN || "node";
+
+// A real PTY needs Node + node-pty. If those aren't available the /api/pty
+// route degrades (see index.ts) — but we optimistically assume yes.
 export const PTY_AVAILABLE = true;
 
-// Track the child PTY per live socket so message/close handlers can reach it.
-const shells = new WeakMap<object, ChildProcessWithoutNullStreams>();
+// Track the bridge subprocess per live socket.
+const bridges = new WeakMap<object, ChildProcessWithoutNullStreams>();
 
 /** Build the hono `upgradeWebSocket` events for a given request context. */
 export function ptyEvents(cwd: string, cols: number, rows: number) {
   return {
     onOpen(_evt: Event, ws: WSContext) {
-      const shell = process.env.SHELL || "/bin/zsh";
       const dir = cwd || process.env.HOME || process.cwd();
-      let child: ChildProcessWithoutNullStreams;
+      let bridge: ChildProcessWithoutNullStreams;
       try {
-        child = spawn(shell, ["-i"], {
-          cwd: dir,
-          env: {
-            ...process.env,
-            TERM: "xterm-256color",
-            PAGER: "cat",
-            GIT_PAGER: "cat",
-            COLUMNS: String(cols || 80),
-            LINES: String(rows || 24),
-          },
-        });
+        bridge = spawn(
+          NODE_BIN,
+          [BRIDGE, dir, String(cols || 80), String(rows || 24)],
+          { cwd: dir, env: process.env },
+        );
       } catch (err) {
-        ws.close(1011, `terminal spawn failed: ${String(err)}`);
+        ws.close(1011, `terminal bridge spawn failed: ${String(err)}`);
         return;
       }
-      shells.set(ws.raw as object, child);
+      bridges.set(ws.raw as object, bridge);
 
-      // Shell output → client. The shell has piped stdio (not a TTY), so it
-      // emits Unix "\n"; xterm needs "\r\n" to return the cursor to column 0
-      // (otherwise multi-line output stair-steps). Translate LF→CRLF here.
-      const forward = (buf: Buffer) => {
+      // Raw PTY output (bridge stdout) → client. xterm renders ANSI natively.
+      bridge.stdout.on("data", (buf: Buffer) => {
         try {
-          const text = buf
-            .toString("utf8")
-            // zsh prints a reverse-video "%" + a run of spaces then a CR to mark
-            // output that lacked a trailing newline. We render plain text, so
-            // drop that whole marker line.
-            .replace(/%\s{2,}\r?/g, "")
-            // LF→CRLF so multi-line output doesn't stair-step in xterm.
-            .replace(/\r?\n/g, "\r\n");
-          ws.send(text);
+          ws.send(buf.toString("utf8"));
         } catch {
           /* socket gone */
         }
-      };
-      child.stdout.on("data", forward);
-      child.stderr.on("data", forward);
-      child.on("close", (code) => {
+      });
+      // Bridge diagnostics (its stderr) — surface once, dimmed, don't spam.
+      bridge.stderr.on("data", (buf: Buffer) => {
+        const msg = buf.toString("utf8").trim();
+        if (msg && /load failed|spawn failed/.test(msg)) {
+          try {
+            ws.send(
+              `\r\n\x1b[31m[terminal unavailable: ${msg}]\x1b[0m\r\n`,
+            );
+          } catch {
+            /* ignore */
+          }
+        }
+      });
+      bridge.on("close", () => {
         try {
-          ws.send(`\r\n\x1b[90m[process exited: ${code ?? 0}]\x1b[0m\r\n`);
           ws.close(1000, "terminal exited");
         } catch {
           /* already closed */
         }
       });
-      child.on("error", (err) => {
+      bridge.on("error", (err) => {
         try {
           ws.send(`\r\n\x1b[31m[terminal error: ${String(err)}]\x1b[0m\r\n`);
         } catch {
@@ -93,39 +92,41 @@ export function ptyEvents(cwd: string, cols: number, rows: number) {
     },
 
     onMessage(evt: MessageEvent, ws: WSContext) {
-      const child = shells.get(ws.raw as object);
-      if (!child) return;
+      const bridge = bridges.get(ws.raw as object);
+      if (!bridge) return;
       const data =
         typeof evt.data === "string"
           ? evt.data
           : Buffer.from(evt.data as ArrayBuffer).toString("utf8");
-      // Resize control frames are accepted; we can't ioctl the script PTY, so
-      // we just export COLUMNS/LINES is not retroactive — best-effort no-op.
+      // Resize control frames pass through to the bridge as a resize command;
+      // everything else is raw keystrokes.
       if (data.startsWith("{")) {
         try {
           const msg = JSON.parse(data);
-          if (msg && msg.type === "resize") return;
+          if (msg && msg.type === "resize") {
+            bridge.stdin.write(
+              JSON.stringify({ t: "resize", cols: msg.cols, rows: msg.rows }) +
+                "\n",
+            );
+            return;
+          }
         } catch {
-          /* not a control frame — fall through to write raw keystrokes */
+          /* not a control frame — treat as keystrokes below */
         }
       }
-      // Raw keystrokes straight to the PTY — it echoes + line-edits + completes.
-      try {
-        child.stdin.write(data);
-      } catch {
-        /* stdin closed */
-      }
+      bridge.stdin.write(JSON.stringify({ t: "data", d: data }) + "\n");
     },
 
     onClose(_evt: CloseEvent, ws: WSContext) {
-      const child = shells.get(ws.raw as object);
-      if (child) {
+      const bridge = bridges.get(ws.raw as object);
+      if (bridge) {
         try {
-          child.kill();
+          bridge.stdin.end();
+          bridge.kill();
         } catch {
           /* already dead */
         }
-        shells.delete(ws.raw as object);
+        bridges.delete(ws.raw as object);
       }
     },
   };

@@ -171,7 +171,9 @@ export function RightPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  // Persist a new tab set + active id for this chat.
+  // Persist a tab set + active id for this chat. Setters + the store write all
+  // happen in the event handler (never inside a render or a setState updater),
+  // which avoids React's "setState during render" warning.
   const commitTabs = useCallback(
     (tabs: OpenTab[], active: string | null) => {
       setOpenTabs(tabs);
@@ -182,70 +184,53 @@ export function RightPanel({
   );
 
   // Open (or focus) a tab of the given kind. Unique kinds focus an existing tab;
-  // browser/terminal always spawn a fresh instance. Returns the active id.
+  // browser/terminal always spawn a fresh instance.
   const openTab = useCallback(
-    (kind: TabKind, opts?: { url?: string; makeActive?: boolean }) => {
-      setOpenTabs((prev) => {
-        const existing = !MULTI_INSTANCE.has(kind)
-          ? prev.find((t) => t.kind === kind)
-          : undefined;
-        if (existing) {
-          setActiveTabId(existing.id);
-          patchLayout(sessionId, { openTabs: prev, activeTabId: existing.id });
-          return prev;
-        }
-        const tab: OpenTab = { id: newTabId(kind), kind, url: opts?.url };
-        const next = [...prev, tab];
-        setActiveTabId(tab.id);
-        patchLayout(sessionId, { openTabs: next, activeTabId: tab.id });
-        return next;
-      });
+    (kind: TabKind, opts?: { url?: string }) => {
+      const existing = !MULTI_INSTANCE.has(kind)
+        ? openTabs.find((t) => t.kind === kind)
+        : undefined;
+      if (existing) {
+        commitTabs(openTabs, existing.id);
+        return;
+      }
+      const tab: OpenTab = { id: newTabId(kind), kind, url: opts?.url };
+      commitTabs([...openTabs, tab], tab.id);
     },
-    [patchLayout, sessionId],
+    [openTabs, commitTabs],
   );
 
   // Focus an already-open tab.
   const focusTab = useCallback(
-    (id: string) => {
-      setActiveTabId(id);
-      patchLayout(sessionId, { activeTabId: id });
-    },
-    [patchLayout, sessionId],
+    (id: string) => commitTabs(openTabs, id),
+    [openTabs, commitTabs],
   );
 
   // Close a tab. If it was active, fall back to the previous tab (or the empty
   // tab-list state when none remain).
   const closeTab = useCallback(
     (id: string) => {
-      setOpenTabs((prev) => {
-        const idx = prev.findIndex((t) => t.id === id);
-        if (idx === -1) return prev;
-        const next = prev.filter((t) => t.id !== id);
-        setActiveTabId((curActive) => {
-          let nextActive = curActive;
-          if (curActive === id) {
-            const fallback = next[idx - 1] ?? next[idx] ?? next[next.length - 1];
-            nextActive = fallback?.id ?? null;
-          }
-          patchLayout(sessionId, { openTabs: next, activeTabId: nextActive });
-          return nextActive;
-        });
-        return next;
-      });
+      const idx = openTabs.findIndex((t) => t.id === id);
+      if (idx === -1) return;
+      const next = openTabs.filter((t) => t.id !== id);
+      let nextActive = activeTabId;
+      if (activeTabId === id) {
+        const fallback = next[idx - 1] ?? next[idx] ?? next[next.length - 1];
+        nextActive = fallback?.id ?? null;
+      }
+      commitTabs(next, nextActive);
     },
-    [patchLayout, sessionId],
+    [openTabs, activeTabId, commitTabs],
   );
 
   // Update a browser tab's persisted url.
   const setTabUrl = useCallback(
     (id: string, url: string) => {
-      setOpenTabs((prev) => {
-        const next = prev.map((t) => (t.id === id ? { ...t, url } : t));
-        patchLayout(sessionId, { openTabs: next });
-        return next;
-      });
+      const next = openTabs.map((t) => (t.id === id ? { ...t, url } : t));
+      setOpenTabs(next);
+      patchLayout(sessionId, { openTabs: next });
     },
-    [patchLayout, sessionId],
+    [openTabs, patchLayout, sessionId],
   );
 
   // Seed a tab from `defaultTab` when there are no persisted tabs yet.
