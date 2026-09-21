@@ -66,6 +66,12 @@ export function sendMessage(opts: SendOpts): ReadableStream<Uint8Array> {
   // prompt is the trailing positional arg
   args.push(opts.prompt);
 
+  // Log the effective run config (not the prompt) so it's easy to confirm the
+  // permission mode / model the UI selected actually reached the CLI.
+  console.log(
+    `[claude-run] mode=${opts.permissionMode || "acceptEdits"} model=${opts.model ?? "default"} ${opts.sessionId ? "resume" : "new"}`,
+  );
+
   // Holds the spawned child so the stream's `cancel` can kill it if the client
   // disconnects (e.g. navigates away) instead of leaking a `claude` process.
   let child: ReturnType<typeof spawn> | undefined;

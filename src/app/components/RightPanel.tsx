@@ -1,6 +1,6 @@
 "use client";
 
-import { forwardRef, useCallback, useEffect, useRef, useState } from "react";
+import { forwardRef, memo, useCallback, useEffect, useRef, useState } from "react";
 import {
   ReviewIcon,
   TerminalTabIcon,
@@ -133,7 +133,7 @@ export type RightPanelProps = {
   sessionId?: string;
 };
 
-export function RightPanel({
+export const RightPanel = memo(function RightPanel({
   diffFiles = MOCK_DIFF_FILES,
   defaultTab = "none",
   cwd,
@@ -429,7 +429,7 @@ export function RightPanel({
       </div>
     </aside>
   );
-}
+});
 
 /**
  * Empty state (matches the reference): header controls at the top, then the tab

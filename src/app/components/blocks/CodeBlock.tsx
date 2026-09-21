@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { CopyIcon, CheckIcon } from "../../chat/components/icons";
 
 /**
@@ -60,8 +60,17 @@ function highlight(code: string): string {
   }
 }
 
-export function CodeBlock({ code, lang }: { code: string; lang?: string }) {
+export const CodeBlock = memo(function CodeBlock({
+  code,
+  lang,
+}: {
+  code: string;
+  lang?: string;
+}) {
   const [copied, setCopied] = useState(false);
+  // Highlight once per unique code string — not on every render (e.g. the copy
+  // button's `copied` toggle) and not on every parent re-render.
+  const html = useMemo(() => highlight(code), [code]);
 
   const onCopy = () => {
     try {
@@ -95,8 +104,8 @@ export function CodeBlock({ code, lang }: { code: string; lang?: string }) {
         </button>
       </div>
       <pre className="overflow-x-auto bg-code-bg px-3 py-2.5 font-mono text-[13px] leading-[1.5] text-code-text">
-        <code dangerouslySetInnerHTML={{ __html: highlight(code) }} />
+        <code dangerouslySetInnerHTML={{ __html: html }} />
       </pre>
     </div>
   );
-}
+});

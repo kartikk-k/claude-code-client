@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import type { ChatMessage, ContentBlock } from "../lib/types";
 import { Markdown } from "./blocks/Markdown";
 import { ToolCard } from "./blocks/ToolCard";
@@ -145,7 +145,10 @@ function collectText(content: ContentBlock[]): string {
     .join("\n\n");
 }
 
-function UserTurn({ message }: { message: ChatMessage }) {
+// Memoized: a durable message's `content` is immutable, so an unchanged turn
+// never re-renders (and never re-parses its Markdown) when the list re-renders
+// for streaming or a chat switch.
+const UserTurn = memo(function UserTurn({ message }: { message: ChatMessage }) {
   const text = collectText(message.content);
   const images = message.content
     .map(imageSrc)
@@ -177,9 +180,9 @@ function UserTurn({ message }: { message: ChatMessage }) {
       ) : null}
     </div>
   );
-}
+});
 
-function AssistantTurn({
+const AssistantTurn = memo(function AssistantTurn({
   message,
   resultsById,
   onOpenAgent,
@@ -282,11 +285,11 @@ function AssistantTurn({
       </div>
     </div>
   );
-}
+});
 
 /* --------------------------------------------------------------- component */
 
-export function MessageList({
+export const MessageList = memo(function MessageList({
   messages,
   onOpenAgent,
   streamingText,
@@ -316,26 +319,67 @@ export function MessageList({
     return map;
   }, [messages]);
 
+  // Windowing: only render the most recent `WINDOW` turns on open. A large
+  // transcript (hundreds/thousands of turns) otherwise mounts tens of thousands
+  // of DOM nodes at once — seconds of work that made switching INTO a big chat
+  // lag. You land at the bottom anyway, so the tail is what matters; a "Show
+  // earlier" control reveals the rest in chunks. Resets to the tail whenever the
+  // conversation changes (a new `messages` array identity from a chat switch).
+  const WINDOW = 40;
+  const STEP = 80;
+  const [visibleCount, setVisibleCount] = useState(WINDOW);
+  useEffect(() => {
+    // On a chat switch (messages identity changes), re-window to the tail.
+    setVisibleCount(WINDOW);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages]);
+
+  const hiddenCount = Math.max(0, messages.length - visibleCount);
+  const visibleMessages =
+    hiddenCount > 0 ? messages.slice(hiddenCount) : messages;
+
   return (
     <div className="mx-auto w-full max-w-[832px] px-8 py-4">
-      {messages.map((m) => {
-        if (m.role === "user") {
-          // `data-msg-id` anchors this turn for the table-of-contents rail.
-          return (
-            <div key={m.uuid} data-msg-id={m.uuid}>
-              <UserTurn message={m} />
-            </div>
-          );
-        }
-        return (
-          <AssistantTurn
-            key={m.uuid}
-            message={m}
-            resultsById={resultsById}
-            onOpenAgent={onOpenAgent}
-          />
-        );
-      })}
+      {hiddenCount > 0 ? (
+        <div className="flex justify-center py-2">
+          <button
+            type="button"
+            onClick={() =>
+              setVisibleCount((c) => Math.min(messages.length, c + STEP))
+            }
+            className="rounded-full border border-panel-border px-3 py-1 text-xs font-medium text-text-secondary transition-colors hover:bg-nav-active-bg hover:text-text-primary"
+          >
+            Show {Math.min(STEP, hiddenCount)} earlier{" "}
+            {hiddenCount === 1 ? "message" : "messages"}
+          </button>
+        </div>
+      ) : null}
+      {visibleMessages.map((m) => (
+        // `content-visibility: auto` lets the browser SKIP layout + paint for
+        // any turn scrolled out of view, so a 1000-message transcript no longer
+        // lays out 50k nodes at once — the multi-second mount/reflow that made
+        // switching to a big chat lag. `contain-intrinsic-size` gives an
+        // estimated height so the scrollbar + scroll position stay stable while
+        // off-screen turns are un-rendered. `data-msg-id` anchors the ToC rail.
+        <div
+          key={m.uuid}
+          data-msg-id={m.uuid}
+          style={{
+            contentVisibility: "auto",
+            containIntrinsicSize: "auto 120px",
+          }}
+        >
+          {m.role === "user" ? (
+            <UserTurn message={m} />
+          ) : (
+            <AssistantTurn
+              message={m}
+              resultsById={resultsById}
+              onOpenAgent={onOpenAgent}
+            />
+          )}
+        </div>
+      ))}
 
       {/* Optimistic user bubble for the just-sent prompt, shown only until the
           durable transcript catches up (i.e. it isn't already the last turn). */}
@@ -362,7 +406,7 @@ export function MessageList({
       ) : null}
     </div>
   );
-}
+});
 
 /** True if the last user turn's text already equals the pending prompt (so we
  *  don't render the optimistic bubble twice after the transcript reconciles). */

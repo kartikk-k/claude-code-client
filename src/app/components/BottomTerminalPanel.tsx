@@ -12,7 +12,7 @@
  * wiring is intentionally deferred pending backend (Bun/node-pty) support. This
  * pane stays a static prompt placeholder until then.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { TerminalTabIcon, AddTabIcon, XIcon } from "../chat/components/icons";
 import { Tooltip } from "./ui/Tooltip";
 import { TerminalView } from "./TerminalView";
@@ -24,7 +24,7 @@ import {
   BOTTOM_DEFAULT_HEIGHT as DEFAULT_HEIGHT,
 } from "@/stores";
 
-export function BottomTerminalPanel({
+export const BottomTerminalPanel = memo(function BottomTerminalPanel({
   open,
   cwd,
   onClose,
@@ -243,7 +243,7 @@ export function BottomTerminalPanel({
       </div>
     </div>
   );
-}
+});
 
 const cx = (...parts: Array<string | false | undefined>) =>
   parts.filter(Boolean).join(" ");

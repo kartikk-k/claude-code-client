@@ -59,6 +59,12 @@ type SessionState = {
   loadProjects: () => Promise<void>;
   loadSessions: (projectId: string) => Promise<void>;
   selectSession: (projectId: string, sessionId: string) => Promise<void>;
+  /**
+   * Select a session knowing only its id (the URL is `/[sessionId]`). Resolves
+   * the owning project from loaded sessions — loading projects first if needed —
+   * then selects. Returns the resolved projectId, or null if it can't be found.
+   */
+  selectSessionById: (sessionId: string) => Promise<string | null>;
   refreshTranscript: (projectId: string, sessionId: string) => Promise<void>;
   /** Clear the active chat (composer targets a brand-new session on next send). */
   newChat: (projectId?: string) => void;
@@ -184,13 +190,55 @@ export const useSessionStore = create<SessionState>()(
       },
 
       selectSession: async (projectId, sessionId) => {
+        // Switch instantly: set active synchronously so the view swaps to the
+        // (already-cached) transcript with no await in the critical path.
         set({ active: { projectId, sessionId } });
+        // If we already have this transcript cached, don't refetch on the click
+        // path — that added network latency to every switch AND replaced the
+        // cached object with a new reference, forcing every transcript-keyed
+        // memo (buildToc, prRef, resultsById) to recompute and the whole
+        // message list to re-parse. `refreshTranscript` still exists for an
+        // explicit reload / after a turn completes.
+        if (get().transcripts[sessionId]) return;
         try {
           const t = await api.session(projectId, sessionId);
           set((st) => ({ transcripts: { ...st.transcripts, [sessionId]: t } }));
         } catch (e) {
           set({ serverError: String(e) });
         }
+      },
+
+      selectSessionById: async (sessionId) => {
+        if (!sessionId) return null;
+        // Already the active session? Nothing to resolve.
+        const cur = get().active;
+        if (cur?.sessionId === sessionId) return cur.projectId;
+
+        // Find the owning project among loaded sessions.
+        const findPid = () => {
+          const byProject = get().sessionsByProject;
+          for (const [pid, sessions] of Object.entries(byProject)) {
+            if (sessions.some((s) => s.id === sessionId)) return pid;
+          }
+          return null;
+        };
+
+        let pid = findPid();
+        if (!pid) {
+          // Not resolvable yet. Kick off a projects load (which prefetches every
+          // project's sessions) if we haven't already. The CALLER re-invokes
+          // this as `sessionsByProject` fills in — so we don't poll here; we
+          // just ensure the data is being fetched and return for now.
+          if (get().projects.length === 0) await get().loadProjects();
+          pid = findPid();
+          if (!pid) return null; // caller's reactive effect will retry
+        }
+
+        // Set active optimistically even before the transcript arrives, so the
+        // view leaves the empty state immediately on a cold reload.
+        set({ active: { projectId: pid, sessionId } });
+        await get().selectSession(pid, sessionId);
+        return pid;
       },
 
       refreshTranscript: async (projectId, sessionId) => {

@@ -52,6 +52,61 @@ export type FileEntry = {
   size?: number;
 };
 
+/** Real subscription usage from `/api/usage` (mirrors Claude Code's /usage). */
+export type UsageWindow = { pctLeft: number; resetsAt: string | null };
+export type Usage = {
+  available: boolean;
+  /** Headline "percent left", 0–100. null when usage can't be determined. */
+  pctLeft: number | null;
+  fiveHour?: UsageWindow;
+  sevenDay?: UsageWindow;
+  primary?: "fiveHour" | "sevenDay";
+  fetchedAt?: number;
+};
+
+/* ------------------------------- MCP ---------------------------------- */
+
+export type McpStatus = "connected" | "needs_auth" | "failed" | "unknown";
+export type McpServer = {
+  name: string;
+  target: string;
+  transport?: "http" | "sse" | "stdio";
+  status: McpStatus;
+};
+export type McpServerDetail = McpServer & {
+  scope?: string;
+  command?: string;
+  args?: string;
+  url?: string;
+};
+export type McpListResult = { ok: boolean; servers: McpServer[]; error?: string };
+export type McpMutationResult = { ok: boolean; message?: string; error?: string };
+export type AddMcpInput = {
+  name: string;
+  transport?: "http" | "sse" | "stdio";
+  target: string;
+  args?: string[];
+  env?: string[];
+  headers?: string[];
+  scope?: "local" | "user" | "project";
+};
+
+/** POST/DELETE that returns the parsed JSON body even on 4xx (so the caller
+ *  sees `{ ok:false, error }` instead of a thrown status). */
+async function sendResult<T>(
+  method: "POST" | "DELETE",
+  path: string,
+  body?: unknown,
+): Promise<T> {
+  const res = await fetch(`${SERVER_URL}${path}`, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+    cache: "no-store",
+  });
+  return (await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }))) as T;
+}
+
 const enc = encodeURIComponent;
 const sessionPath = (projectId: string, sessionId: string) =>
   `/api/projects/${enc(projectId)}/sessions/${enc(sessionId)}`;
@@ -92,6 +147,24 @@ export const api = {
     get<{ content: string; truncated: boolean }>(
       `/api/files/content?cwd=${enc(cwd)}&path=${enc(path)}`
     ),
+
+  /** Real subscription usage (percent left + reset windows). */
+  usage: () => get<Usage>("/api/usage"),
+
+  /* --- MCP servers (real `claude mcp` management) --- */
+  /** List installed MCP servers with live connection status. */
+  mcpList: () => get<McpListResult>("/api/mcp"),
+  /** Details for a single MCP server (scope, transport, command/url). */
+  mcpGet: (name: string) =>
+    get<{ ok: boolean; detail?: McpServerDetail; error?: string }>(
+      `/api/mcp/${enc(name)}`,
+    ),
+  /** Install (add) an MCP server. */
+  mcpAdd: (input: AddMcpInput) =>
+    sendResult<McpMutationResult>("POST", "/api/mcp", input),
+  /** Uninstall (remove) an MCP server by name. */
+  mcpRemove: (name: string) =>
+    sendResult<McpMutationResult>("DELETE", `/api/mcp/${enc(name)}`),
 };
 
 export type SendPayload = {

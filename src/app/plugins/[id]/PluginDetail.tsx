@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import type { Plugin } from "../catalog";
 import { PluginTile } from "../components/PluginTile";
@@ -9,23 +9,88 @@ import {
   ArrowUpIcon,
   CopyIcon,
   CheckIcon,
-  LinkIcon,
   WrenchIcon,
+  TrashIcon,
 } from "../../chat/components/icons";
-import { usePrefsStore } from "@/stores";
+import {
+  api,
+  type McpServerDetail,
+  type McpStatus,
+  type AddMcpInput,
+} from "../../lib/api";
+import { parseInstallCommand } from "../page";
 
 /**
- * Plugin detail page — hero (mark, name, tagline, actions), example prompts,
- * the tools this MCP server exposes, an install snippet, and an info table.
- * Matches the reference detail layout; colors are the app's tokens. Install /
- * copy are UI-only for now.
+ * Plugin detail page — hero (mark, name, tagline, actions), a live status
+ * banner, example prompts, the tools this MCP server exposes, an install
+ * snippet, and an info table.
+ *
+ * Now wired to the REAL `claude mcp` backend: on mount it calls `api.mcpGet`
+ * for this plugin's server name to learn whether it's actually installed and
+ * its live status/scope/transport. Install → `api.mcpAdd`, Uninstall →
+ * `api.mcpRemove`, each followed by a refetch. Copy actually writes to the
+ * clipboard. Every control performs a real action.
  */
+
+const cx = (...parts: Array<string | false | null | undefined>) =>
+  parts.filter(Boolean).join(" ");
+
+/** Live-status → color + label. Hexes are the app's status palette. */
+const STATUS_META: Record<McpStatus, { color: string; label: string }> = {
+  connected: { color: "#3fb950", label: "Connected" },
+  needs_auth: { color: "#d29922", label: "Needs auth" },
+  failed: { color: "#f85149", label: "Failed" },
+  unknown: { color: "#8b949e", label: "Unknown" },
+};
+
+/** Derive an AddMcpInput for this plugin, with a forgiving fallback. */
+function inputForPlugin(plugin: Plugin): AddMcpInput {
+  const parsed = parseInstallCommand(plugin.command);
+  if (parsed) return parsed;
+  const urlMatch = plugin.command.match(/https?:\/\/\S+/i);
+  return {
+    name: plugin.id,
+    transport: plugin.transport,
+    target: urlMatch?.[0] ?? plugin.command,
+    scope: "local",
+  };
+}
+
 export function PluginDetail({ plugin }: { plugin: Plugin }) {
-  const installed = usePrefsStore(
-    (s) => s.pluginsInstalled[plugin.id] ?? plugin.installed
-  );
-  const setPluginInstalled = usePrefsStore((s) => s.setPluginInstalled);
+  // Live install state for this plugin's server (matched by name).
+  const [detail, setDetail] = useState<McpServerDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [bannerError, setBannerError] = useState<string | null>(null);
+
+  // Install/uninstall action state.
+  const [acting, setActing] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
   const [copied, setCopied] = useState(false);
+
+  const installed = detail != null;
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setBannerError(null);
+    try {
+      const res = await api.mcpGet(plugin.name);
+      // The endpoint answers ok:false / no detail when the server isn't
+      // installed — that's a normal "not installed" state, not an error.
+      setDetail(res.ok && res.detail ? res.detail : null);
+    } catch (e) {
+      setBannerError(
+        e instanceof Error ? e.message : "Couldn't check install status."
+      );
+      setDetail(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [plugin.name]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   const copyCommand = async () => {
     try {
@@ -34,6 +99,36 @@ export function PluginDetail({ plugin }: { plugin: Plugin }) {
       setTimeout(() => setCopied(false), 1500);
     } catch {
       /* clipboard unavailable — no-op */
+    }
+  };
+
+  const install = async () => {
+    setActing(true);
+    setActionError(null);
+    try {
+      const res = await api.mcpAdd(inputForPlugin(plugin));
+      if (!res.ok) {
+        setActionError(res.error || "Install failed.");
+        return;
+      }
+      await load();
+    } finally {
+      setActing(false);
+    }
+  };
+
+  const uninstall = async () => {
+    setActing(true);
+    setActionError(null);
+    try {
+      const res = await api.mcpRemove(detail?.name ?? plugin.name);
+      if (!res.ok) {
+        setActionError(res.error || "Remove failed.");
+        return;
+      }
+      await load();
+    } finally {
+      setActing(false);
     }
   };
 
@@ -49,7 +144,7 @@ export function PluginDetail({ plugin }: { plugin: Plugin }) {
       </nav>
 
       {/* Hero */}
-      <div className="mb-8">
+      <div className="mb-6">
         <PluginTile
           color={plugin.color}
           mark={plugin.mark}
@@ -75,25 +170,44 @@ export function PluginDetail({ plugin }: { plugin: Plugin }) {
               {copied ? (
                 <CheckIcon className="size-4 icon-strong" />
               ) : (
-                <LinkIcon className="size-4 icon-muted" />
+                <CopyIcon className="size-4 icon-muted" />
               )}
-              {copied ? "Copied" : "Copy link"}
+              {copied ? "Copied" : "Copy command"}
             </button>
-            <button
-              type="button"
-              onClick={() => setPluginInstalled(plugin.id, !installed)}
-              className={[
-                "flex h-9 items-center gap-1.5 rounded-[11px] px-3.5 text-[13px] font-semibold transition-colors",
-                installed
-                  ? "border border-control-border bg-control-bg text-text-primary hover:bg-nav-active-bg/60"
-                  : "bg-btn-solid-bg text-btn-solid-text hover:opacity-90",
-              ].join(" ")}
-            >
-              {installed ? "Installed" : "Add plugin"}
-            </button>
+            {installed ? (
+              <button
+                type="button"
+                onClick={uninstall}
+                disabled={acting}
+                className="flex h-9 items-center gap-1.5 rounded-[11px] border border-control-border bg-control-bg px-3.5 text-[13px] font-semibold text-text-primary transition-colors hover:bg-nav-active-bg/60 disabled:opacity-60"
+              >
+                {acting ? <Spinner /> : <TrashIcon className="size-4 icon-muted" />}
+                {acting ? "Removing…" : "Uninstall"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={install}
+                disabled={acting || loading}
+                className="flex h-9 items-center gap-1.5 rounded-[11px] bg-btn-solid-bg px-3.5 text-[13px] font-semibold text-btn-solid-text transition-opacity hover:opacity-90 disabled:opacity-60"
+              >
+                {acting ? <Spinner className="!icon-strong" /> : null}
+                {acting ? "Installing…" : "Add plugin"}
+              </button>
+            )}
           </div>
         </div>
       </div>
+
+      {/* Live status banner */}
+      <StatusBanner
+        loading={loading}
+        installed={installed}
+        detail={detail}
+        error={bannerError}
+        actionError={actionError}
+        onRetry={load}
+      />
 
       {/* Example prompts */}
       <section className="mb-8">
@@ -105,10 +219,9 @@ export function PluginDetail({ plugin }: { plugin: Plugin }) {
         >
           <div className="flex flex-col gap-2">
             {plugin.examples.map((ex, i) => (
-              <button
+              <div
                 key={i}
-                type="button"
-                className="group flex items-center gap-3 rounded-[12px] border border-card-border bg-row-bg px-4 py-3 text-left transition-colors hover:bg-nav-active-bg/40"
+                className="group flex items-center gap-3 rounded-[12px] border border-card-border bg-row-bg px-4 py-3 text-left"
               >
                 <span className="flex min-w-0 flex-1 items-baseline gap-2">
                   <span className="shrink-0 text-[13px] font-semibold text-text-primary">
@@ -118,10 +231,10 @@ export function PluginDetail({ plugin }: { plugin: Plugin }) {
                     {ex}
                   </span>
                 </span>
-                <span className="flex size-6 shrink-0 items-center justify-center rounded-full border border-control-border text-text-secondary transition-colors group-hover:bg-nav-active-bg group-hover:text-text-strong">
+                <span className="flex size-6 shrink-0 items-center justify-center rounded-full border border-control-border text-text-faint">
                   <ArrowUpIcon className="size-3.5 rotate-90" />
                 </span>
-              </button>
+              </div>
             ))}
           </div>
         </div>
@@ -187,7 +300,13 @@ export function PluginDetail({ plugin }: { plugin: Plugin }) {
         <dl className="grid grid-cols-[130px_1fr] gap-y-3 text-[13px] leading-5">
           <InfoRow label="Developer" value={plugin.developer} />
           <InfoRow label="Category" value={plugin.category} />
-          <InfoRow label="Transport" value={plugin.transport.toUpperCase()} />
+          <InfoRow
+            label="Transport"
+            value={(detail?.transport ?? plugin.transport).toUpperCase()}
+          />
+          {installed && detail?.scope ? (
+            <InfoRow label="Scope" value={detail.scope} />
+          ) : null}
           <InfoRow label="Version" value={plugin.version} />
           <InfoRow
             label="Website"
@@ -209,6 +328,108 @@ export function PluginDetail({ plugin }: { plugin: Plugin }) {
         </dl>
       </section>
     </>
+  );
+}
+
+/* --------------------------------- pieces -------------------------------- */
+
+function Spinner({ className = "" }: { className?: string }) {
+  return (
+    <span
+      className={cx(
+        "inline-block size-4 shrink-0 animate-spin rounded-full border-2 border-current border-t-transparent icon-muted",
+        className
+      )}
+      aria-hidden="true"
+    />
+  );
+}
+
+function StatusBanner({
+  loading,
+  installed,
+  detail,
+  error,
+  actionError,
+  onRetry,
+}: {
+  loading: boolean;
+  installed: boolean;
+  detail: McpServerDetail | null;
+  error: string | null;
+  actionError: string | null;
+  onRetry: () => void;
+}) {
+  // Network error checking install status.
+  if (error) {
+    return (
+      <div className="mb-8 flex items-center gap-2.5 rounded-[14px] border border-card-border bg-row-bg px-4 py-3 text-[13px] text-text-secondary">
+        <span className="size-2 shrink-0 rounded-full" style={{ background: "#f85149" }} />
+        <span className="min-w-0 flex-1">{error}</span>
+        <button
+          type="button"
+          onClick={onRetry}
+          className="shrink-0 text-[13px] font-medium text-link transition-opacity hover:opacity-80"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="mb-8 flex items-center gap-2 rounded-[14px] border border-card-border bg-row-bg px-4 py-3 text-[13px] text-text-faint">
+        <Spinner />
+        Checking install status…
+      </div>
+    );
+  }
+
+  if (!installed) {
+    return (
+      <div className="mb-8 rounded-[14px] border border-card-border bg-row-bg px-4 py-3">
+        <div className="flex items-center gap-2.5 text-[13px]">
+          <span
+            className="size-2 shrink-0 rounded-full"
+            style={{ background: STATUS_META.unknown.color }}
+          />
+          <span className="text-text-secondary">Not installed.</span>
+        </div>
+        {actionError ? (
+          <p className="mt-1.5 text-[12px] leading-4" style={{ color: "#f85149" }}>
+            {actionError}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+
+  const meta = STATUS_META[detail?.status ?? "unknown"] ?? STATUS_META.unknown;
+  return (
+    <div className="mb-8 rounded-[14px] border border-card-border bg-row-bg px-4 py-3">
+      <div className="flex items-center gap-2.5 text-[13px]">
+        <span className="size-2 shrink-0 rounded-full" style={{ background: meta.color }} />
+        <span style={{ color: meta.color }} className="font-medium">
+          {meta.label}
+        </span>
+        <span className="text-text-faint">·</span>
+        <span className="text-text-secondary">Installed</span>
+        {detail?.target ? (
+          <>
+            <span className="text-text-faint">·</span>
+            <span className="min-w-0 truncate font-mono text-[12px] text-text-secondary">
+              {detail.target}
+            </span>
+          </>
+        ) : null}
+      </div>
+      {actionError ? (
+        <p className="mt-1.5 text-[12px] leading-4" style={{ color: "#f85149" }}>
+          {actionError}
+        </p>
+      ) : null}
+    </div>
   );
 }
 

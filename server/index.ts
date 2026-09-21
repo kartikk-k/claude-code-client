@@ -21,6 +21,14 @@ import { readConfig, writeConfig } from "./config.ts";
 import { gitStatus, gitDiff } from "./git.ts";
 import { listDir, readFileContent } from "./files.ts";
 import { ptyEvents, PTY_AVAILABLE } from "./pty.ts";
+import { getUsage } from "./usage.ts";
+import {
+  listMcp,
+  getMcp,
+  addMcp,
+  removeMcp,
+  type AddMcpInput,
+} from "./mcp.ts";
 
 const { upgradeWebSocket, websocket } = createBunWebSocket();
 
@@ -119,6 +127,52 @@ app.get("/api/config", async (c) => c.json(await readConfig()));
 app.put("/api/config", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   return c.json(await writeConfig(body));
+});
+
+/* --------------------------------- mcp -------------------------------- */
+
+// Real MCP server management via the `claude mcp` CLI. These drive the Plugins
+// page: list (with live status), get details, install (add), uninstall (remove).
+
+app.get("/api/mcp", async (c) => c.json(await listMcp()));
+
+app.get("/api/mcp/:name", async (c) => {
+  const res = await getMcp(c.req.param("name"));
+  return c.json(res, res.ok ? 200 : 404);
+});
+
+app.post("/api/mcp", async (c) => {
+  const body = (await c.req.json().catch(() => null)) as AddMcpInput | null;
+  if (!body || !body.name || !body.target) {
+    return c.json({ ok: false, error: "name and target are required" }, 400);
+  }
+  const res = await addMcp(body);
+  return c.json(res, res.ok ? 200 : 400);
+});
+
+app.delete("/api/mcp/:name", async (c) => {
+  const res = await removeMcp(c.req.param("name"));
+  return c.json(res, res.ok ? 200 : 400);
+});
+
+/* -------------------------------- usage ------------------------------- */
+
+// Real subscription usage (the interactive `/usage` numbers). Cached briefly so
+// concurrent sidebars / the once-a-minute poll don't spam the OAuth endpoint.
+// Returns { pctLeft: null } when usage can't be determined (no token / offline)
+// so the UI can hide the number instead of inventing one.
+let usageCache: { at: number; data: Awaited<ReturnType<typeof getUsage>> } | null =
+  null;
+const USAGE_TTL_MS = 30_000;
+
+app.get("/api/usage", async (c) => {
+  const now = Date.now();
+  if (!usageCache || now - usageCache.at > USAGE_TTL_MS) {
+    usageCache = { at: now, data: await getUsage() };
+  }
+  const data = usageCache.data;
+  if (!data) return c.json({ available: false, pctLeft: null });
+  return c.json({ available: true, ...data });
 });
 
 /* --------------------------------- git -------------------------------- */

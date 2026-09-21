@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { ProjectSummary, SessionSummary } from "../lib/types";
 import { useSessionStore } from "@/stores";
@@ -26,7 +26,7 @@ import {
   ChatBubblePlusIcon,
   FolderPointerIcon,
 } from "../chat/components/icons";
-import { UsageRing } from "./UsageRing";
+import { UsageRing, usageColor } from "./UsageRing";
 import { AccountMenu } from "./AccountMenu";
 import { SessionRowMenu } from "./SessionRowMenu";
 import { Tooltip } from "./ui/Tooltip";
@@ -95,8 +95,14 @@ type SessionSidebarProps = {
   onToggleProject: (id: string) => void;
   onSelectSession: (projectId: string, sessionId: string) => void;
   onNewChat: () => void;
-  /** Percentage of usage remaining, 0–100 (drives the footer ring). */
-  usagePctLeft?: number;
+  /** Start a fresh chat in a specific project's working directory. */
+  onNewChatInProject: (projectId: string) => void;
+  /**
+   * Percentage of usage remaining, 0–100 (drives the footer ring). `null` means
+   * "not yet known" (still loading, or no usage source) — the footer shows a
+   * neutral state instead of a fabricated number.
+   */
+  usagePctLeft?: number | null;
 };
 
 /** Full-width nav row shared by the "New chat" + top-level items. */
@@ -395,6 +401,7 @@ function ProjectGroup({
   activeSessionId,
   onToggle,
   onSelectSession,
+  onNewChatInProject,
 }: {
   project: ProjectSummary;
   /** undefined = not loaded yet (fetching); [] = loaded but empty. */
@@ -403,6 +410,8 @@ function ProjectGroup({
   activeSessionId?: string;
   onToggle: () => void;
   onSelectSession: (projectId: string, sessionId: string) => void;
+  /** Start a fresh chat in THIS project's working directory. */
+  onNewChatInProject: (projectId: string) => void;
 }) {
   const [showAll, setShowAll] = useState(false);
   const loading = sessions === undefined;
@@ -448,8 +457,11 @@ function ProjectGroup({
         <RowActionButton label="Project options">
           <DotsIcon width={15} height={15} />
         </RowActionButton>
-        <RowActionButton label="Edit project">
-          <EditIcon width={15} height={15} />
+        <RowActionButton
+          label="New chat in this project"
+          onClick={() => onNewChatInProject(project.id)}
+        >
+          <ChatBubblePlusIcon width={15} height={15} />
         </RowActionButton>
       </span>
     </div>
@@ -564,8 +576,14 @@ function ProjectGroup({
 }
 
 /** Sidebar footer: an "Options" button that opens the account menu, plus a
- *  circular usage indicator whose color reflects remaining headroom. */
-function SidebarFooter({ usagePctLeft }: { usagePctLeft: number }) {
+ *  circular usage indicator whose color reflects remaining headroom.
+ *  `usagePctLeft === null` means usage isn't known yet — the ring renders an
+ *  empty track and the tooltip says so, rather than showing a fake percentage. */
+function SidebarFooter({ usagePctLeft }: { usagePctLeft: number | null }) {
+  const known = usagePctLeft != null;
+  const title = known
+    ? `${Math.round(usagePctLeft)}% usage left`
+    : "Usage unavailable";
   return (
     <div className="mt-auto shrink-0 border-t border-panel-border p-2">
       <div className="flex items-center gap-2">
@@ -581,17 +599,25 @@ function SidebarFooter({ usagePctLeft }: { usagePctLeft: number }) {
           }
         />
         <span
-          className="flex size-7 shrink-0 items-center justify-center rounded-full text-text-secondary"
-          title={`${Math.round(usagePctLeft)}% usage left`}
+          className="flex shrink-0 items-center gap-1.5 rounded-full text-text-secondary"
+          title={title}
         >
-          <UsageRing pctLeft={usagePctLeft} size={18} strokeWidth={2} />
+          {/* Percent-left label sits to the LEFT of the ring, tinted to match. */}
+          <span
+            className="text-xs font-medium tabular-nums leading-none"
+            style={known ? { color: usageColor(usagePctLeft) } : undefined}
+          >
+            {known ? `${Math.round(usagePctLeft)}%` : "—"}
+          </span>
+          {/* When unknown, draw an empty track (pctLeft 0 with no fill color). */}
+          <UsageRing pctLeft={known ? usagePctLeft : 0} size={18} strokeWidth={2} />
         </span>
       </div>
     </div>
   );
 }
 
-export function SessionSidebar({
+export const SessionSidebar = memo(function SessionSidebar({
   projects,
   sessionsByProject,
   recents,
@@ -601,7 +627,8 @@ export function SessionSidebar({
   onToggleProject,
   onSelectSession,
   onNewChat,
-  usagePctLeft = 45,
+  onNewChatInProject,
+  usagePctLeft = null,
 }: SessionSidebarProps) {
   const router = useRouter();
   const projectById = useMemo(
@@ -698,6 +725,7 @@ export function SessionSidebar({
                   activeSessionId={activeSessionId}
                   onToggle={() => onToggleProject(project.id)}
                   onSelectSession={onSelectSession}
+                  onNewChatInProject={onNewChatInProject}
                 />
               ))}
             </div>
@@ -734,4 +762,4 @@ export function SessionSidebar({
       <SidebarFooter usagePctLeft={usagePctLeft} />
     </aside>
   );
-}
+});

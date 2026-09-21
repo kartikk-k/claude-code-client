@@ -1,5 +1,34 @@
-import { Fragment, type ReactNode } from "react";
+"use client";
+
+import { Fragment, memo, useMemo, useState, type ReactNode } from "react";
 import { CodeBlock } from "./CodeBlock";
+
+/**
+ * An inline image, rendered the way GitHub renders badges: a small (~20px tall)
+ * inline `<img>` that sits on the text baseline. Most PR-body images are
+ * shields.io badges, so this keeps them compact and inline rather than blowing
+ * up to full width. If the image can't load (offline, 404, blocked host) we
+ * fall back to the alt text so the reader still sees what the badge said.
+ */
+function Badge({ alt, src }: { alt: string; src: string }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return (
+      <span className="rounded bg-code-bg px-1 font-mono text-[0.8em] text-text-secondary">
+        {alt || "image"}
+      </span>
+    );
+  }
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={src}
+      alt={alt}
+      onError={() => setFailed(true)}
+      className="inline-block h-5 max-w-full rounded align-text-bottom"
+    />
+  );
+}
 
 /**
  * Lightweight, dependency-free Markdown renderer.
@@ -39,6 +68,29 @@ function parseInline(text: string): ReactNode[] {
           {m[1]}
         </code>
       ),
+    },
+    {
+      // Linked image (a badge that navigates): [![alt](imgUrl)](linkUrl).
+      // Must come before the plain-image and link tokens so the wrapping
+      // link + inner image are captured as one unit, matching GitHub badges.
+      re: /\[!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/,
+      render: (m) => (
+        <a
+          key={k()}
+          href={m[3]}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mr-1 inline-block align-text-bottom"
+        >
+          <Badge alt={m[1]} src={m[2]} />
+        </a>
+      ),
+    },
+    {
+      // Standalone image: ![alt](url). Rendered as an inline badge-style <img>
+      // (shields.io badges etc. render exactly as on GitHub).
+      re: /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/,
+      render: (m) => <Badge key={k()} alt={m[1]} src={m[2]} />,
     },
     {
       re: /\*\*([^*]+)\*\*/,
@@ -376,18 +428,26 @@ function renderMarkdown(text: string): ReactNode[] {
   return blocks;
 }
 
-export function Markdown({ text }: { text: string }) {
-  if (!text) return null;
-  const segments = splitFences(text);
-  return (
-    <div className="text-text-primary">
-      {segments.map((seg) =>
-        seg.type === "code" ? (
-          <CodeBlock key={k()} code={seg.code} lang={seg.lang} />
-        ) : (
-          <Fragment key={k()}>{renderMarkdown(seg.text)}</Fragment>
-        )
-      )}
-    </div>
-  );
-}
+/**
+ * Memoized so an unchanged message never re-parses. This matters a lot: the
+ * message list re-renders on every streamed token, but each durable message's
+ * `text` is stable, so `memo` skips it entirely. Only the actively-streaming
+ * bubble (whose `text` grows) actually re-parses. The `useMemo` additionally
+ * caches the parse across any re-render that does slip through (e.g. a parent
+ * context change) so the hand-rolled parser + regex passes run once per text.
+ */
+export const Markdown = memo(function Markdown({ text }: { text: string }) {
+  const content = useMemo(() => {
+    if (!text) return null;
+    const segments = splitFences(text);
+    return segments.map((seg) =>
+      seg.type === "code" ? (
+        <CodeBlock key={k()} code={seg.code} lang={seg.lang} />
+      ) : (
+        <Fragment key={k()}>{renderMarkdown(seg.text)}</Fragment>
+      )
+    );
+  }, [text]);
+  if (content === null) return null;
+  return <div className="text-text-primary">{content}</div>;
+});

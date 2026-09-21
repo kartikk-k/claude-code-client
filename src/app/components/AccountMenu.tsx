@@ -24,8 +24,8 @@ export function AccountMenu({
 }: {
   /** The button that opens the menu (Base UI wires trigger behavior onto it). */
   trigger: React.ReactElement<Record<string, unknown>>;
-  /** Usage remaining, 0–100, shown on the Usage row. */
-  pctLeft: number;
+  /** Usage remaining, 0–100, shown on the Usage row. `null` = not yet known. */
+  pctLeft: number | null;
   onSelect?: (id: "usage" | "invite" | "settings" | "logout") => void;
 }) {
   const router = useRouter();
@@ -42,7 +42,7 @@ export function AccountMenu({
       <MenuItem
         icon={<GaugeIcon width={16} height={16} />}
         label="Usage"
-        description={`${Math.round(pctLeft)}% left`}
+        description={pctLeft == null ? "—" : `${Math.round(pctLeft)}% left`}
         onSelect={() => handle("usage")}
       />
       <MenuItem

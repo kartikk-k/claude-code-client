@@ -20,6 +20,8 @@ import { TooltipProvider } from "./components/ui/Tooltip";
 import { RichComposer } from "./components/RichComposer";
 import { BottomTerminalPanel } from "./components/BottomTerminalPanel";
 import { ChatNav } from "./chat/components/ChatNav";
+import { useUsage } from "./lib/useUsage";
+import { useAutoScroll } from "./lib/useAutoScroll";
 
 /** Flatten a message's text blocks into a single string. */
 function messageText(msg: ChatMessage): string {
@@ -58,11 +60,15 @@ function buildToc(messages: ChatMessage[]): TocItem[] {
  * the active session transcript, and wires the sidebar + conversation +
  * sub-agents panel + composer together.
  */
-export function ClientShell() {
+export function ClientShell({ chatId }: { chatId?: string } = {}) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const selectSessionById = useSessionStore((s) => s.selectSessionById);
 
   // --- server-backed data + active chat (session store) ---
+  // Real subscription usage, refreshed every minute (drives the sidebar ring).
+  const { pctLeft: usagePctLeft } = useUsage();
+
   const projects = useSessionStore((s) => s.projects);
   const sessionsByProject = useSessionStore((s) => s.sessionsByProject);
   const active = useSessionStore((s) => s.active);
@@ -101,6 +107,7 @@ export function ClientShell() {
   const toggleBottomPanel = useUiStore((s) => s.toggleBottomPanel);
   const setBottomPanelOpen = useUiStore((s) => s.setBottomPanelOpen);
   const toggleProjectExpanded = useUiStore((s) => s.toggleProjectExpanded);
+  const setProjectExpanded = useUiStore((s) => s.setProjectExpanded);
 
   // --- transient, presentational (stays local) ---
   const [activeAgentId, setActiveAgentId] = useState<string | undefined>();
@@ -196,13 +203,45 @@ export function ClientShell() {
     [toggleProjectExpanded, loadSessions]
   );
 
+  // Selecting a session just navigates to its URL (`/[sessionId]`); the URL is
+  // the source of truth. The sync effect below turns that into an active
+  // session. We optimistically set active too so the view switches instantly,
+  // before the route transition settles.
   const selectSession = useCallback(
     (projectId: string, sessionId: string) => {
       setActiveAgentId(undefined);
       selectSessionAction(projectId, sessionId);
+      router.push(`/${sessionId}`);
     },
-    [selectSessionAction]
+    [selectSessionAction, router]
   );
+
+  // URL → active session. When the route carries a `chatId` (`/[sessionId]`)
+  // that isn't already active, resolve its project and open it. This makes the
+  // URL shareable and makes a reload land on the right chat.
+  //
+  // Resolution needs the owning project's sessions loaded. On a cold reload
+  // straight onto `/[sessionId]` those arrive asynchronously (loadProjects
+  // prefetches them), so this effect also depends on `sessionsByProject` and
+  // re-runs as data lands — retrying resolution until the session is found,
+  // instead of giving up after a fixed delay.
+  useEffect(() => {
+    if (!chatId) return;
+    if (active?.sessionId === chatId) return;
+    selectSessionById(chatId);
+  }, [chatId, active?.sessionId, sessionsByProject, selectSessionById]);
+
+  // active → URL. When a real session becomes active but the URL doesn't
+  // reflect it (most importantly: a brand-new chat that just minted its id on
+  // first send, so the address bar should become `/[newId]`), sync the URL.
+  // Guarded so it never fights the URL→active effect above: we only push when
+  // there IS an active session id AND it differs from the current chatId.
+  useEffect(() => {
+    const sid = active?.sessionId;
+    if (!sid) return; // empty id = unsent new chat; keep the URL as-is
+    if (sid === chatId) return;
+    router.replace(`/${sid}`);
+  }, [active?.sessionId, chatId, router]);
 
   // Open a session requested via ?project=&session= (legacy cross-route handoff).
   useEffect(() => {
@@ -211,7 +250,7 @@ export function ClientShell() {
     if (!projectId || !sessionId) return;
     if (active?.sessionId === sessionId) return;
     selectSession(projectId, sessionId);
-    router.replace("/");
+    router.replace(`/${sessionId}`);
   }, [searchParams, active?.sessionId, selectSession, router]);
 
   // Recents: newest sessions across all loaded projects (excluding archived).
@@ -259,6 +298,19 @@ export function ClientShell() {
     return null;
   }, [transcript]);
 
+  // Auto-scroll the transcript: jump to bottom on open, stay pinned while a
+  // response streams (unless the user scrolled up), and expose a "jump to
+  // bottom" button + flag when the user isn't at the bottom.
+  const streamActive = streaming?.active ?? false;
+  const contentSignal = `${transcript?.messages.length ?? 0}:${
+    streamActive ? streaming?.text.length ?? 0 : 0
+  }`;
+  const { atBottom, scrollToBottom } = useAutoScroll({
+    scrollRef,
+    contentSignal,
+    conversationKey: active?.sessionId ?? null,
+  });
+
   const onSend = useCallback(
     async (p: {
       text: string;
@@ -280,6 +332,50 @@ export function ClientShell() {
       });
     },
     [active, activeCwd, sendMessage]
+  );
+
+  // Stable handlers so the memoized sidebar / panels don't re-render when
+  // ClientShell re-renders for unrelated state (streaming tokens, drafts, drags).
+  const handleNewChat = useCallback(() => {
+    // Start a fresh chat in the current project, or the most recent one so the
+    // composer always has a working directory to run in.
+    const pid = active?.projectId ?? projects[0]?.id;
+    if (pid) loadSessions(pid);
+    newChat(pid);
+    // A new chat has no session id yet — its URL is `/` until the first send
+    // mints one (then the active→URL effect updates the address).
+    router.push("/");
+  }, [active?.projectId, projects, loadSessions, newChat, router]);
+
+  const handleNewChatInProject = useCallback(
+    (pid: string) => {
+      // "New chat in THIS folder" — from the project row's ⊕ button.
+      loadSessions(pid);
+      setProjectExpanded(pid, true);
+      newChat(pid);
+      router.push("/");
+    },
+    [loadSessions, setProjectExpanded, newChat, router]
+  );
+
+  const handleOpenAgent = useCallback(
+    (id: string) => setActiveAgentId(id),
+    []
+  );
+  const handleToggleRightPanel = useCallback(
+    () => setRightPanelOpen(!rightPanelOpen),
+    [setRightPanelOpen, rightPanelOpen]
+  );
+  const handleCloseBottomPanel = useCallback(
+    () => setBottomPanelOpen(false),
+    [setBottomPanelOpen]
+  );
+  const handleOpenInPanel = useCallback(
+    (f: { name: string; url: string; mime: string }) => {
+      setPreviewFile(f);
+      setRightPanelOpen(true);
+    },
+    [setRightPanelOpen]
   );
 
   return (
@@ -310,15 +406,9 @@ export function ClientShell() {
           expanded={expanded}
           onToggleProject={toggleProject}
           onSelectSession={selectSession}
-          onNewChat={() => {
-            // Start a fresh chat in the current project, or the most recent one
-            // so the composer always has a working directory to run in. Ensure
-            // that project's sessions are loaded so a cwd can be derived.
-            const pid = active?.projectId ?? projects[0]?.id;
-            if (pid) loadSessions(pid);
-            newChat(pid);
-          }}
-          usagePctLeft={45}
+          onNewChat={handleNewChat}
+          onNewChatInProject={handleNewChatInProject}
+          usagePctLeft={usagePctLeft}
         />
         </div>
 
@@ -370,7 +460,7 @@ export function ClientShell() {
           pinned={activeSession?.pinned}
           archived={activeSession?.archived}
           rightPanelOpen={rightPanelOpen}
-          onToggleRightPanel={() => setRightPanelOpen(!rightPanelOpen)}
+          onToggleRightPanel={handleToggleRightPanel}
           bottomPanelOpen={bottomPanelOpen}
           onToggleBottomPanel={toggleBottomPanel}
         />
@@ -416,7 +506,7 @@ export function ClientShell() {
                 ) : null}
                 <MessageList
                   messages={transcript.messages}
-                  onOpenAgent={(id) => setActiveAgentId(id)}
+                  onOpenAgent={handleOpenAgent}
                   streamingText={
                     streaming?.active ? streaming.text : undefined
                   }
@@ -436,6 +526,35 @@ export function ClientShell() {
             )}
           </div>
 
+          {/* "Scroll to bottom" pill — shown only when the user has scrolled up
+              away from the latest messages. Centered just above the composer. */}
+          {transcript && !atBottom ? (
+            <div className="pointer-events-none absolute inset-x-0 bottom-[150px] z-30 flex justify-center">
+              <button
+                type="button"
+                aria-label="Scroll to bottom"
+                onClick={() => scrollToBottom("smooth")}
+                className="pointer-events-auto flex size-8 items-center justify-center rounded-full border border-panel-border bg-panel-bg/90 text-text-secondary shadow-md backdrop-blur transition-colors hover:bg-nav-active-bg hover:text-text-primary"
+              >
+                <svg
+                  width={16}
+                  height={16}
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M8 3v10M3.5 8.5 8 13l4.5-4.5"
+                    stroke="currentColor"
+                    strokeWidth={1.5}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+            </div>
+          ) : null}
+
           {/* Composer floats on top of the transcript (which scrolls behind it).
               Its backdrop blur keeps it readable over the content underneath. */}
           <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20">
@@ -446,10 +565,7 @@ export function ClientShell() {
                 cwd={activeCwd}
                 sessionId={active?.sessionId}
                 gitBranch={transcript?.gitBranch}
-                onOpenInPanel={(f) => {
-                  setPreviewFile(f);
-                  setRightPanelOpen(true);
-                }}
+                onOpenInPanel={handleOpenInPanel}
               />
             </div>
           </div>
@@ -475,7 +591,7 @@ export function ClientShell() {
         <BottomTerminalPanel
           open={bottomPanelOpen}
           cwd={transcript?.cwd}
-          onClose={() => setBottomPanelOpen(false)}
+          onClose={handleCloseBottomPanel}
           sessionId={active?.sessionId}
         />
       </div>
