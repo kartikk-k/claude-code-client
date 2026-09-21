@@ -262,3 +262,19 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+
+/*
+ * Terminal (xterm.js): render directly on the panel surface — no separate dark
+ * box. The theme background is already transparent, but xterm paints its own
+ * layers, so force every one of them (and the canvas) transparent. The cursor +
+ * text colors still come from the theme, so readability is unaffected.
+ */
+.xterm,
+.xterm .xterm-viewport,
+.xterm .xterm-screen {
+  background-color: transparent !important;
+}
+.xterm .xterm-viewport {
+  /* Thin, unobtrusive scrollbar matching the app rather than the default. */
+  scrollbar-width: thin;
+}
