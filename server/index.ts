@@ -214,6 +214,10 @@ console.log(`[claude-client] server listening on http://localhost:${port}`);
 export default {
   port,
   fetch: app.fetch,
+  // The /api/message SSE stream stays open while the `claude` CLI thinks — which
+  // easily exceeds Bun's default 10s idle timeout and would otherwise abort the
+  // response mid-turn. Raise it to Bun's maximum (255s).
+  idleTimeout: 255,
   // Bun WebSocket handler from hono/bun; drives the /api/pty upgrade.
   websocket,
 };

@@ -66,9 +66,35 @@ export function sendMessage(opts: SendOpts): ReadableStream<Uint8Array> {
   // prompt is the trailing positional arg
   args.push(opts.prompt);
 
+  // Holds the spawned child so the stream's `cancel` can kill it if the client
+  // disconnects (e.g. navigates away) instead of leaking a `claude` process.
+  let child: ReturnType<typeof spawn> | undefined;
+
   return new ReadableStream<Uint8Array>({
     start(controller) {
-      let child;
+      // Once the stream is closed (client gone, or we called close ourselves),
+      // any late child output must NOT be enqueued — that throws
+      // "Controller is already closed" and crashes the request. `safeEnqueue`
+      // and `safeClose` make every emit a no-op after close.
+      let closed = false;
+      const safeEnqueue = (bytes: Uint8Array) => {
+        if (closed) return;
+        try {
+          controller.enqueue(bytes);
+        } catch {
+          closed = true;
+        }
+      };
+      const safeClose = () => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          /* already closed */
+        }
+      };
+
       try {
         child = spawn(CLAUDE_BIN, args, {
           cwd: opts.cwd,
@@ -76,17 +102,17 @@ export function sendMessage(opts: SendOpts): ReadableStream<Uint8Array> {
           stdio: ["ignore", "pipe", "pipe"],
         });
       } catch (err) {
-        controller.enqueue(
+        safeEnqueue(
           sse("error", { message: `failed to spawn claude: ${String(err)}` })
         );
-        controller.close();
+        safeClose();
         return;
       }
 
-      controller.enqueue(sse("start", { sessionId: opts.sessionId ?? null }));
+      safeEnqueue(sse("start", { sessionId: opts.sessionId ?? null }));
 
       let buf = "";
-      child.stdout.on("data", (chunk: Buffer) => {
+      child.stdout?.on("data", (chunk: Buffer) => {
         buf += chunk.toString("utf8");
         let idx: number;
         while ((idx = buf.indexOf("\n")) >= 0) {
@@ -94,41 +120,41 @@ export function sendMessage(opts: SendOpts): ReadableStream<Uint8Array> {
           buf = buf.slice(idx + 1);
           if (!line) continue;
           try {
-            controller.enqueue(sse("message", JSON.parse(line)));
+            safeEnqueue(sse("message", JSON.parse(line)));
           } catch {
-            controller.enqueue(sse("log", { line }));
+            safeEnqueue(sse("log", { line }));
           }
         }
       });
 
-      child.stderr.on("data", (chunk: Buffer) => {
-        controller.enqueue(sse("stderr", { line: chunk.toString("utf8") }));
+      child.stderr?.on("data", (chunk: Buffer) => {
+        safeEnqueue(sse("stderr", { line: chunk.toString("utf8") }));
       });
 
       child.on("error", (err) => {
-        controller.enqueue(sse("error", { message: String(err) }));
-        try {
-          controller.close();
-        } catch {
-          /* already closed */
-        }
+        safeEnqueue(sse("error", { message: String(err) }));
+        safeClose();
       });
 
       child.on("close", (code) => {
         if (buf.trim()) {
           try {
-            controller.enqueue(sse("message", JSON.parse(buf.trim())));
+            safeEnqueue(sse("message", JSON.parse(buf.trim())));
           } catch {
-            controller.enqueue(sse("log", { line: buf.trim() }));
+            safeEnqueue(sse("log", { line: buf.trim() }));
           }
         }
-        controller.enqueue(sse("done", { code }));
-        try {
-          controller.close();
-        } catch {
-          /* already closed */
-        }
+        safeEnqueue(sse("done", { code }));
+        safeClose();
       });
+    },
+    // Client disconnected — stop the CLI so we don't leak the process.
+    cancel() {
+      try {
+        child?.kill();
+      } catch {
+        /* already gone */
+      }
     },
   });
 }

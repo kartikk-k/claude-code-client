@@ -22,6 +22,16 @@ import type {
   SessionTranscript,
 } from "../app/lib/types";
 
+/**
+ * Encode a cwd into the project-dir id Claude Code uses under ~/.claude/projects
+ * (it replaces "/" and "." with "-"). A brand-new chat's session file lands in
+ * the dir for its cwd — which may differ from the project we launched it from —
+ * so the reconcile fetch must target THIS id, not the launching project's.
+ */
+function encodeProjectId(cwd: string): string {
+  return cwd.replace(/[/.]/g, "-");
+}
+
 /** Live stream state for a session while a turn is generating. */
 export type StreamState = {
   /** Accumulated assistant text from stream deltas. */
@@ -38,6 +48,9 @@ type SessionState = {
   transcripts: Record<string, SessionTranscript>;
   streaming: Record<string, StreamState>;
   active: { projectId: string; sessionId: string } | null;
+  /** Working directory for a brand-new chat (no transcript yet) — so the
+   *  composer can send before a session file exists. */
+  newChatCwd?: string;
   serverError: string | null;
   /** AbortControllers for in-flight sends, keyed by session (not persisted). */
   _aborts: Record<string, AbortController>;
@@ -98,13 +111,26 @@ function patchSession(
   };
 }
 
-/** Extract streamed text out of a Claude stream-json `message` frame. */
+/**
+ * Extract streamed assistant text from a Claude CLI stream-json `message` frame.
+ *
+ * The CLI (`--include-partial-messages`) wraps Anthropic SSE events like:
+ *   { type: "stream_event", event: { type: "content_block_delta",
+ *       index, delta: { type: "text_delta", text } } }
+ * We forward text_delta chunks for text blocks; thinking_delta is ignored here
+ * (it renders separately). Also tolerate a flatter `content_block_delta` shape
+ * in case a future CLI version drops the wrapper.
+ */
 function extractDelta(data: unknown): string {
   if (!data || typeof data !== "object") return "";
   const d = data as Record<string, unknown>;
-  // content_block_delta → { delta: { type: "text_delta", text } }
-  if (d.type === "content_block_delta") {
-    const delta = d.delta as Record<string, unknown> | undefined;
+  // Unwrap the CLI's `stream_event` envelope when present.
+  const evt =
+    d.type === "stream_event" && d.event && typeof d.event === "object"
+      ? (d.event as Record<string, unknown>)
+      : d;
+  if (evt.type === "content_block_delta") {
+    const delta = evt.delta as Record<string, unknown> | undefined;
     if (delta && delta.type === "text_delta" && typeof delta.text === "string") {
       return delta.text;
     }
@@ -177,9 +203,22 @@ export const useSessionStore = create<SessionState>()(
       },
 
       newChat: (projectId) => {
-        set((st) => ({
-          active: projectId ? { projectId, sessionId: "" } : null,
-        }));
+        set((st) => {
+          if (!projectId) return { active: null, newChatCwd: undefined };
+          // Derive the cwd from a sibling session whose cwd actually belongs to
+          // THIS project (its encoding matches the project id), so a new chat
+          // stays in the right directory. Fall back to the decoded project path.
+          const sessions = st.sessionsByProject[projectId] ?? [];
+          const ownCwd = sessions.find(
+            (s) => s.cwd && encodeProjectId(s.cwd) === projectId,
+          )?.cwd;
+          const cwd =
+            ownCwd ?? st.projects.find((p) => p.id === projectId)?.path;
+          return {
+            active: { projectId, sessionId: "" },
+            newChatCwd: cwd,
+          };
+        });
       },
 
       sendMessage: async (input) => {
@@ -208,6 +247,49 @@ export const useSessionStore = create<SessionState>()(
             },
           },
         }));
+
+        // Smooth typewriter reveal: the CLI emits text in a few big chunks, so
+        // appending them raw looks jumpy. Instead we accumulate into `target`
+        // and let a rAF ticker reveal `streaming.text` toward it a few chars per
+        // frame, so it types in smoothly regardless of chunk size.
+        let target = "";
+        let revealed = 0;
+        let raf = 0;
+        const tick = () => {
+          const cur = get().streaming[sessionId];
+          if (!cur) {
+            raf = 0;
+            return;
+          }
+          if (revealed < target.length) {
+            // Reveal proportionally to how far behind we are (min a few chars),
+            // so a large backlog catches up fast but small ones stay gentle.
+            const remaining = target.length - revealed;
+            const step = Math.max(2, Math.ceil(remaining / 8));
+            revealed = Math.min(target.length, revealed + step);
+            set((st) => {
+              const c = st.streaming[sessionId];
+              if (!c) return {};
+              return {
+                streaming: {
+                  ...st.streaming,
+                  [sessionId]: { ...c, text: target.slice(0, revealed) },
+                },
+              };
+            });
+          }
+          // Keep ticking while active or still catching up.
+          if (get().streaming[sessionId]?.active || revealed < target.length) {
+            raf = requestAnimationFrame(tick);
+          } else {
+            raf = 0;
+          }
+        };
+        const startTicker = () => {
+          if (!raf && typeof requestAnimationFrame !== "undefined") {
+            raf = requestAnimationFrame(tick);
+          }
+        };
 
         const payload: SendPayload = {
           cwd,
@@ -242,30 +324,45 @@ export const useSessionStore = create<SessionState>()(
             }
             const chunk = extractDelta(frame.data);
             if (chunk) {
-              set((st) => {
-                const cur = st.streaming[sessionId];
-                if (!cur) return {};
-                return {
-                  streaming: {
-                    ...st.streaming,
-                    [sessionId]: { ...cur, text: cur.text + chunk },
-                  },
-                };
-              });
+              target += chunk;
+              startTicker();
             }
           }
+          // Flush any remaining buffered characters instantly at end of turn.
+          revealed = target.length;
         } catch (e) {
           set({ serverError: String(e) });
         } finally {
+          if (raf) cancelAnimationFrame(raf);
+          // The session file lands in the dir for its cwd, which for a NEW chat
+          // may not be the project we launched from — reconcile against the
+          // cwd-derived project id so the transcript/list target the real dir.
+          const realProjectId = encodeProjectId(cwd);
+          // Point `active` at the real project so the sidebar + transcript line up.
+          if (realProjectId !== projectId) {
+            set((st) =>
+              st.active?.sessionId === sessionId
+                ? { active: { projectId: realProjectId, sessionId } }
+                : {},
+            );
+          }
           // Reconcile: the CLI has appended the durable turn to disk — re-read it.
-          await get().refreshTranscript(projectId, sessionId);
-          // A new session now exists on disk; refresh the project's list.
+          // The transcript is set BEFORE streaming is cleared (below), so the
+          // durable turn is on screen the instant the live bubble is removed —
+          // no flash, no duplicate.
+          await get().refreshTranscript(realProjectId, sessionId);
+          // A new session now exists on disk; refresh that project's list (and
+          // the project list itself, in case a brand-new project dir appeared).
           if (isNew) {
             try {
-              const s = await api.sessions(projectId);
+              const s = await api.sessions(realProjectId);
               set((st) => ({
-                sessionsByProject: { ...st.sessionsByProject, [projectId]: s },
+                sessionsByProject: {
+                  ...st.sessionsByProject,
+                  [realProjectId]: s,
+                },
               }));
+              get().loadProjects();
             } catch {
               /* non-fatal */
             }

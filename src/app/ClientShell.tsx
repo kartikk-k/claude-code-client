@@ -69,9 +69,21 @@ export function ClientShell() {
   const loadSessions = useSessionStore((s) => s.loadSessions);
   const selectSessionAction = useSessionStore((s) => s.selectSession);
   const newChat = useSessionStore((s) => s.newChat);
+  const newChatCwd = useSessionStore((s) => s.newChatCwd);
   const sendMessage = useSessionStore((s) => s.sendMessage);
   const transcript = useActiveTranscript() ?? null;
   const streaming = useStreaming(active?.sessionId);
+  // The working directory to send in: the loaded transcript's cwd for an
+  // existing chat, else the derived new-chat cwd, else any sibling session's
+  // cwd in the active project, else the project's decoded path.
+  const activeCwd = useMemo(() => {
+    if (transcript?.cwd) return transcript.cwd;
+    if (!active) return undefined;
+    if (newChatCwd) return newChatCwd;
+    const sibling = sessionsByProject[active.projectId]?.find((s) => s.cwd)?.cwd;
+    if (sibling) return sibling;
+    return projects.find((p) => p.id === active.projectId)?.path;
+  }, [transcript?.cwd, active, newChatCwd, sessionsByProject, projects]);
 
   // --- global chrome (ui store) ---
   const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed);
@@ -218,20 +230,19 @@ export function ClientShell() {
       permissionMode: string;
     }) => {
       // Need a project + cwd to run the CLI. cwd comes from the loaded
-      // transcript (existing chat); a brand-new chat needs a selected project.
-      const cwd = transcript?.cwd;
-      if (!active || !cwd) return;
+      // transcript (existing chat) or the derived new-chat cwd (fresh chat).
+      if (!active || !activeCwd) return;
       await sendMessage({
         projectId: active.projectId,
         sessionId: active.sessionId || undefined,
-        cwd,
+        cwd: activeCwd,
         text: p.text,
         images: p.images,
         model: p.model,
         permissionMode: p.permissionMode,
       });
     },
-    [active, transcript?.cwd, sendMessage]
+    [active, activeCwd, sendMessage]
   );
 
   return (
@@ -257,7 +268,14 @@ export function ClientShell() {
           expanded={expanded}
           onToggleProject={toggleProject}
           onSelectSession={selectSession}
-          onNewChat={() => newChat(active?.projectId)}
+          onNewChat={() => {
+            // Start a fresh chat in the current project, or the most recent one
+            // so the composer always has a working directory to run in. Ensure
+            // that project's sessions are loaded so a cwd can be derived.
+            const pid = active?.projectId ?? projects[0]?.id;
+            if (pid) loadSessions(pid);
+            newChat(pid);
+          }}
           usagePctLeft={45}
         />
       </div>
@@ -345,9 +363,13 @@ export function ClientShell() {
                   }
                 />
               </>
+            ) : active ? (
+              <div className="flex h-full items-center justify-center text-sm text-text-secondary">
+                New chat — type a message below to begin.
+              </div>
             ) : (
               <div className="flex h-full items-center justify-center text-sm text-text-secondary">
-                Select a session to view its transcript.
+                Select a session, or start a new chat.
               </div>
             )}
           </div>
@@ -358,8 +380,8 @@ export function ClientShell() {
             <div className="pointer-events-auto">
               <RichComposer
                 onSend={onSend}
-                disabled={sending || !active}
-                cwd={transcript?.cwd}
+                disabled={sending || !active || !activeCwd}
+                cwd={activeCwd}
                 sessionId={active?.sessionId}
                 gitBranch={transcript?.gitBranch}
                 onOpenInPanel={(f) => {
