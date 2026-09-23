@@ -20,7 +20,11 @@ export type {
 } from "./prefs.store";
 
 export { useSessionStore } from "./session.store";
-export type { StreamState } from "./session.store";
+export type {
+  StreamState,
+  QueuedMessage,
+  SessionActivity,
+} from "./session.store";
 
 export {
   useUiStore,
@@ -59,6 +63,20 @@ export const useActiveTranscript = () =>
 /** The live stream state for a session, if a turn is generating. */
 export const useStreaming = (sessionId: string | null | undefined) =>
   useSessionStore((s) => (sessionId ? s.streaming[sessionId] : undefined));
+
+/** Messages queued (to auto-send after the current turn) for a session. */
+const EMPTY_QUEUE: import("./session.store").QueuedMessage[] = [];
+export const useQueued = (sessionId: string | null | undefined) =>
+  useSessionStore((s) =>
+    sessionId ? s.queued[sessionId] ?? EMPTY_QUEUE : EMPTY_QUEUE,
+  );
+
+/** The sidebar status glyph for a session (running / done-unseen / needs-input),
+ *  or undefined when it has no special status. */
+export const useSessionActivity = (sessionId: string | null | undefined) =>
+  useSessionStore((s) =>
+    sessionId ? s.sessionActivity[sessionId] : undefined,
+  );
 
 /** The per-chat layout for a session (defaults when unsaved). */
 export const useChatLayout = (sessionId: string | null | undefined) =>

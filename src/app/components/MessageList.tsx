@@ -3,7 +3,7 @@
 import { memo, useEffect, useMemo, useState } from "react";
 import type { ChatMessage, ContentBlock } from "../lib/types";
 import { Markdown } from "./blocks/Markdown";
-import { ToolCard } from "./blocks/ToolCard";
+import { ToolGroup, type ToolItem } from "./blocks/ToolGroup";
 import {
   ChevronRightIcon,
   CopyIcon,
@@ -193,23 +193,39 @@ const AssistantTurn = memo(function AssistantTurn({
 }) {
   const copyText = collectText(message.content);
 
+  // Group CONSECUTIVE tool_use blocks into one collapsible ToolGroup (order
+  // preserved — a text/thinking block between calls splits the run). Task tools
+  // still surface a SubAgentChip in addition to being in the group.
   const rendered: React.ReactNode[] = [];
+  let pendingTools: ToolItem[] = [];
+  let groupSeq = 0;
+  const flushTools = () => {
+    if (pendingTools.length === 0) return;
+    rendered.push(<ToolGroup key={`tg-${groupSeq++}`} items={pendingTools} />);
+    pendingTools = [];
+  };
+
   message.content.forEach((block, idx) => {
     switch (block.type) {
       case "text": {
         const t = (block as { text?: string }).text ?? "";
-        if (t.trim())
+        if (t.trim()) {
+          flushTools();
           rendered.push(
             <div key={idx} className="text-sm leading-5">
               <Markdown text={t} />
             </div>
           );
+        }
         break;
       }
       case "thinking": {
         const tb = block as { thinking?: string; text?: string };
         const t = tb.thinking ?? tb.text ?? "";
-        if (t.trim()) rendered.push(<Thought key={idx} text={t} />);
+        if (t.trim()) {
+          flushTools();
+          rendered.push(<Thought key={idx} text={t} />);
+        }
         break;
       }
       case "tool_use": {
@@ -224,7 +240,8 @@ const AssistantTurn = memo(function AssistantTurn({
                 ? input.subagent_type
                 : undefined;
           // Prefer the message's agentId; the tool_use id is a usable fallback
-          // key for opening the sub-agent panel.
+          // key for opening the sub-agent panel. The chip sits above the group.
+          flushTools();
           const agentId = message.agentId ?? tu.id;
           rendered.push(
             <SubAgentChip
@@ -235,15 +252,13 @@ const AssistantTurn = memo(function AssistantTurn({
             />
           );
         }
-        rendered.push(
-          <ToolCard
-            key={`${idx}-tool`}
-            name={tu.name}
-            input={tu.input}
-            result={res?.content}
-            isError={res?.is_error}
-          />
-        );
+        pendingTools.push({
+          id: tu.id || `${idx}`,
+          name: tu.name,
+          input: tu.input,
+          result: res?.content,
+          isError: res?.is_error,
+        });
         break;
       }
       // tool_result blocks are rendered inline with their tool_use, skip here
@@ -253,6 +268,7 @@ const AssistantTurn = memo(function AssistantTurn({
         break;
     }
   });
+  flushTools();
 
   if (message.agentId && !message.content.some((b) => b.type === "tool_use")) {
     // A sidechain/sub-agent turn surfaced directly — offer a jump chip.
@@ -294,6 +310,7 @@ export const MessageList = memo(function MessageList({
   onOpenAgent,
   streamingText,
   pendingUserText,
+  runningTool,
 }: {
   messages: ChatMessage[];
   onOpenAgent?: (agentId: string) => void;
@@ -301,6 +318,8 @@ export const MessageList = memo(function MessageList({
   streamingText?: string;
   /** The just-sent user prompt, shown optimistically before it lands on disk. */
   pendingUserText?: string;
+  /** The tool currently executing in the live turn (shimmering "Running …"). */
+  runningTool?: { name: string; detail: string } | null;
 }) {
   // Index every tool_result by its tool_use_id across the whole transcript.
   const resultsById = useMemo(() => {
@@ -397,16 +416,64 @@ export const MessageList = memo(function MessageList({
       {streamingText !== undefined ? (
         <div className="flex flex-col py-2">
           <div className="flex flex-col gap-1 text-text-primary">
-            <div className="text-sm leading-5">
-              <Markdown text={streamingText} />
-              <span className="ml-0.5 inline-block h-4 w-[6px] translate-y-0.5 animate-pulse bg-text-faint align-baseline" />
-            </div>
+            {streamingText ? (
+              <div className="text-sm leading-5">
+                <Markdown text={streamingText} />
+                {/* Caret only trails the text when no tool line follows. */}
+                {!runningTool ? (
+                  <span className="ml-0.5 inline-block h-4 w-[6px] translate-y-0.5 animate-pulse bg-text-faint align-baseline" />
+                ) : null}
+              </div>
+            ) : null}
+            {/* The tool currently executing — shimmers while it runs. */}
+            {runningTool ? <RunningToolLine tool={runningTool} /> : null}
+            {/* When neither text nor a tool is present yet, show a bare caret. */}
+            {!streamingText && !runningTool ? (
+              <span className="inline-block h-4 w-[6px] animate-pulse bg-text-faint" />
+            ) : null}
           </div>
         </div>
       ) : null}
     </div>
   );
 });
+
+/** The shimmering "Running <tool> <detail>" line for the live tool call. */
+function RunningToolLine({
+  tool,
+}: {
+  tool: { name: string; detail: string };
+}) {
+  const verb = runningVerb(tool.name);
+  return (
+    <div className="flex items-center gap-2 py-0.5">
+      <span className="text-[13px] leading-5 tool-shimmer">
+        <span>{verb}</span>
+        {tool.detail ? (
+          <span className="ml-1 font-mono">{truncateDetail(tool.detail)}</span>
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
+function runningVerb(name: string): string {
+  const n = name.toLowerCase();
+  if (n === "bash") return "Running";
+  if (n === "read") return "Reading";
+  if (n === "write") return "Writing";
+  if (n === "edit" || n === "multiedit") return "Editing";
+  if (n === "glob" || n === "ls") return "Listing files";
+  if (n === "grep" || n === "websearch") return "Searching for";
+  if (n === "webfetch") return "Fetching";
+  if (n === "task") return "Running agent";
+  return "Running";
+}
+
+function truncateDetail(d: string): string {
+  const one = d.replace(/\s+/g, " ").trim();
+  return one.length > 100 ? one.slice(0, 100) + "…" : one;
+}
 
 /** True if the last user turn's text already equals the pending prompt (so we
  *  don't render the optimistic bubble twice after the transcript reconciles). */

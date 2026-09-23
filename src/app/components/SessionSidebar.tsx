@@ -3,7 +3,11 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { ProjectSummary, SessionSummary } from "../lib/types";
-import { useSessionStore } from "@/stores";
+import {
+  useSessionStore,
+  useSessionActivity,
+  type SessionActivity,
+} from "@/stores";
 import {
   ChevronDownIcon,
   ChevronRightIcon,
@@ -82,6 +86,79 @@ function GitStatusIcon({ status }: { status: GitStatus }) {
     return <CodeForkIcon className="size-4 shrink-0 icon-muted" />;
   }
   return null;
+}
+
+/**
+ * The per-session live-status glyph shown at the right of a row:
+ *  - running:     a thin spinning ring (a turn is generating).
+ *  - done-unseen: a solid blue dot (finished in the background, not yet opened).
+ *  - needs-input: a circular exclamation (Claude is waiting on the user).
+ * Rendered inline (no icon dependency) so the exact shapes match the reference.
+ * Takes precedence over the git glyph when present.
+ */
+function SessionStatusIcon({ status }: { status: SessionActivity }) {
+  if (status === "running") {
+    return (
+      <span
+        className="flex size-4 shrink-0 items-center justify-center"
+        role="status"
+        aria-label="Working"
+      >
+        <svg
+          width={15}
+          height={15}
+          viewBox="0 0 16 16"
+          fill="none"
+          className="animate-spin text-text-faint [animation-duration:0.9s]"
+          aria-hidden
+        >
+          {/* faint full ring + a brighter arc that spins over it */}
+          <circle
+            cx="8"
+            cy="8"
+            r="6"
+            stroke="currentColor"
+            strokeOpacity="0.35"
+            strokeWidth="1.6"
+          />
+          <path
+            d="M8 2a6 6 0 0 1 6 6"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+          />
+        </svg>
+      </span>
+    );
+  }
+  if (status === "done-unseen") {
+    return (
+      <span
+        className="flex size-4 shrink-0 items-center justify-center"
+        aria-label="Finished — unread"
+      >
+        <span className="size-2 rounded-full bg-[var(--primary)]" />
+      </span>
+    );
+  }
+  // needs-input → circular exclamation
+  return (
+    <span
+      className="flex size-4 shrink-0 items-center justify-center text-[var(--primary)]"
+      aria-label="Needs your input"
+    >
+      <svg width={15} height={15} viewBox="0 0 16 16" fill="none" aria-hidden>
+        <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.4" />
+        <path
+          d="M8 5v3.5"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+        />
+        <circle cx="8" cy="11" r="0.85" fill="currentColor" />
+      </svg>
+    </span>
+  );
 }
 
 type SessionSidebarProps = {
@@ -234,8 +311,16 @@ function SessionRow({
     }
   }, [renaming]);
 
+  // Live status (running / done-unseen / needs-input) takes precedence over the
+  // ambient git glyph.
+  const activity = useSessionActivity(session.id);
   const gitStatus = sessionGitStatus(session);
-  const showGitIcon = gitStatus === "branch";
+  const showGitIcon = !activity && gitStatus === "branch";
+  const showStatus = Boolean(activity);
+  // The blue dot / needs-input glyph must stay visible even mid-hover (it's a
+  // state the user needs to notice); only the git glyph and the plain time
+  // hide behind the hover actions. A running spinner also stays visible.
+  const statusPersists = activity === "done-unseen" || activity === "needs-input";
 
   const cardRows: HoverMetaRow[] = [];
   if (project) {
@@ -310,18 +395,33 @@ function SessionRow({
               : "text-text-secondary hover:bg-nav-active-bg",
           ].join(" ")}
         >
-          {/* min-w-0 lets the title actually truncate instead of pushing under
-              the trailing icon. A right padding reserves space for the git glyph
-              so text and icon never overlap. */}
+          {/* Title fades out at the right edge (mask-image) instead of a hard
+              ellipsis cut — matching the reference, which softly dissolves the
+              overflow rather than chopping it. min-w-0 lets it actually shrink. */}
           <span
             className={[
-              "min-w-0 flex-1 truncate text-sm leading-5",
+              "min-w-0 flex-1 overflow-hidden whitespace-nowrap text-sm leading-5",
+              "[mask-image:linear-gradient(to_right,#000_calc(100%-28px),transparent)]",
+              "[-webkit-mask-image:linear-gradient(to_right,#000_calc(100%-28px),transparent)]",
               active ? "font-medium" : "",
-              showGitIcon ? "pr-1" : "",
             ].join(" ")}
           >
             {session.title}
           </span>
+          {/* Live status glyph (spinner / blue dot / needs-input). Blue dot and
+              needs-input persist through hover; the spinner does too. */}
+          {showStatus ? (
+            <span
+              className={[
+                "shrink-0",
+                statusPersists
+                  ? ""
+                  : "group-hover:opacity-0 group-focus-within:opacity-0",
+              ].join(" ")}
+            >
+              <SessionStatusIcon status={activity!} />
+            </span>
+          ) : null}
           {trailing ? (
             <span className="shrink-0 group-hover:opacity-0 group-focus-within:opacity-0">
               {trailing}

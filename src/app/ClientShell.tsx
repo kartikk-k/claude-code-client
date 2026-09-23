@@ -8,6 +8,7 @@ import {
   useUiStore,
   useActiveTranscript,
   useStreaming,
+  useQueued,
   LEFT_MIN_WIDTH,
   LEFT_MAX_WIDTH,
 } from "@/stores";
@@ -18,6 +19,7 @@ import { TocRail, type TocItem } from "./components/TocRail";
 import { PrCard, extractPrUrl } from "./components/PrCard";
 import { TooltipProvider } from "./components/ui/Tooltip";
 import { RichComposer } from "./components/RichComposer";
+import { QueuedMessages } from "./components/QueuedMessages";
 import { BottomTerminalPanel } from "./components/BottomTerminalPanel";
 import { ChatNav } from "./chat/components/ChatNav";
 import { useUsage } from "./lib/useUsage";
@@ -79,6 +81,10 @@ export function ClientShell({ chatId }: { chatId?: string } = {}) {
   const newChat = useSessionStore((s) => s.newChat);
   const newChatCwd = useSessionStore((s) => s.newChatCwd);
   const sendMessage = useSessionStore((s) => s.sendMessage);
+  const enqueueMessage = useSessionStore((s) => s.enqueueMessage);
+  const removeQueued = useSessionStore((s) => s.removeQueued);
+  const steerMessage = useSessionStore((s) => s.steerMessage);
+  const queued = useQueued(active?.sessionId);
   const transcript = useActiveTranscript() ?? null;
   const streaming = useStreaming(active?.sessionId);
   // The working directory to send in: the loaded transcript's cwd for an
@@ -231,15 +237,17 @@ export function ClientShell({ chatId }: { chatId?: string } = {}) {
     selectSessionById(chatId);
   }, [chatId, active?.sessionId, sessionsByProject, selectSessionById]);
 
-  // active → URL. When a real session becomes active but the URL doesn't
-  // reflect it (most importantly: a brand-new chat that just minted its id on
-  // first send, so the address bar should become `/[newId]`), sync the URL.
-  // Guarded so it never fights the URL→active effect above: we only push when
-  // there IS an active session id AND it differs from the current chatId.
+  // active → URL, but ONLY when we're on `/` (no chatId in the address). The
+  // URL is authoritative whenever it names a chat: if a `chatId` is present the
+  // URL→active effect above owns reconciliation, and this effect must NOT push
+  // back (otherwise a page opened at /[A] while `active` was persisted as [B]
+  // would bounce A→B). This still handles the two cases that need it:
+  //   - resuming the last chat: land on `/`, persisted `active` → push /[id].
+  //   - a brand-new chat minting its id on first send while on `/`.
   useEffect(() => {
+    if (chatId) return; // URL already names a chat — it wins.
     const sid = active?.sessionId;
-    if (!sid) return; // empty id = unsent new chat; keep the URL as-is
-    if (sid === chatId) return;
+    if (!sid) return; // empty id = unsent new chat; keep `/`.
     router.replace(`/${sid}`);
   }, [active?.sessionId, chatId, router]);
 
@@ -321,6 +329,17 @@ export function ClientShell({ chatId }: { chatId?: string } = {}) {
       // Need a project + cwd to run the CLI. cwd comes from the loaded
       // transcript (existing chat) or the derived new-chat cwd (fresh chat).
       if (!active || !activeCwd) return;
+      // If a turn is already generating, QUEUE this message — it auto-sends as
+      // the next turn (or the user can "Steer" it to send immediately).
+      if (streaming?.active && active.sessionId) {
+        enqueueMessage(active.sessionId, {
+          text: p.text,
+          images: p.images,
+          model: p.model,
+          permissionMode: p.permissionMode,
+        });
+        return;
+      }
       await sendMessage({
         projectId: active.projectId,
         sessionId: active.sessionId || undefined,
@@ -331,7 +350,23 @@ export function ClientShell({ chatId }: { chatId?: string } = {}) {
         permissionMode: p.permissionMode,
       });
     },
-    [active, activeCwd, sendMessage]
+    [active, activeCwd, streaming?.active, enqueueMessage, sendMessage]
+  );
+
+  // Queue actions: steer sends a queued message immediately (interrupt the
+  // running turn); remove drops it. Both need the active session + cwd.
+  const onSteer = useCallback(
+    (id: string) => {
+      if (!active?.sessionId || !activeCwd) return;
+      void steerMessage(active.projectId, active.sessionId, activeCwd, id);
+    },
+    [active, activeCwd, steerMessage]
+  );
+  const onRemoveQueued = useCallback(
+    (id: string) => {
+      if (active?.sessionId) removeQueued(active.sessionId, id);
+    },
+    [active?.sessionId, removeQueued]
   );
 
   // Stable handlers so the memoized sidebar / panels don't re-render when
@@ -513,6 +548,9 @@ export function ClientShell({ chatId }: { chatId?: string } = {}) {
                   pendingUserText={
                     streaming?.active ? streaming.pendingUserText : undefined
                   }
+                  runningTool={
+                    streaming?.active ? streaming.runningTool ?? null : null
+                  }
                 />
               </>
             ) : active ? (
@@ -559,9 +597,23 @@ export function ClientShell({ chatId }: { chatId?: string } = {}) {
               Its backdrop blur keeps it readable over the content underneath. */}
           <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20">
             <div className="pointer-events-auto">
+              {/* Queued messages (send-while-generating), stacked above the input,
+                  aligned to the composer's inner max-width. */}
+              {queued.length ? (
+                <div className="mx-auto w-full max-w-[896px] px-8">
+                  <QueuedMessages
+                    messages={queued}
+                    onSteer={onSteer}
+                    onRemove={onRemoveQueued}
+                  />
+                </div>
+              ) : null}
               <RichComposer
                 onSend={onSend}
-                disabled={sending || !active || !activeCwd}
+                // Hard-disable only when there's no session/cwd to run in. While
+                // a turn generates, typing stays enabled so sends QUEUE.
+                disabled={!active || !activeCwd}
+                isGenerating={sending}
                 cwd={activeCwd}
                 sessionId={active?.sessionId}
                 gitBranch={transcript?.gitBranch}

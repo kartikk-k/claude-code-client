@@ -278,3 +278,51 @@ body {
   /* Thin, unobtrusive scrollbar matching the app rather than the default. */
   scrollbar-width: thin;
 }
+
+/*
+ * Tool-call shimmer — a bright band sweeps across the label of the tool that is
+ * currently running, so the "live" step reads at a glance. Implemented as a
+ * moving gradient clipped to the text (background-clip: text), so it only tints
+ * the glyphs, not a box. Colors come from the theme text tokens, so it works in
+ * light and dark. Disabled automatically under prefers-reduced-motion by the
+ * global rule above (which clamps animation-duration).
+ */
+.tool-shimmer {
+  background: linear-gradient(
+    100deg,
+    var(--text-faint) 30%,
+    var(--text-strong) 50%,
+    var(--text-faint) 70%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: tool-shimmer-sweep 1.6s linear infinite;
+}
+.tool-shimmer * {
+  /* Keep nested spans (verb / detail) transparent so the clip shows through. */
+  color: inherit !important;
+  -webkit-text-fill-color: inherit;
+}
+
+@keyframes tool-shimmer-sweep {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* No sweep for reduced-motion users: show a steady, readable label instead of
+     a frozen mid-gradient (which could look washed out). */
+  .tool-shimmer {
+    animation: none;
+    background: none;
+    color: var(--text-secondary);
+    -webkit-text-fill-color: currentColor;
+  }
+}

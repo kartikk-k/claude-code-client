@@ -32,6 +32,39 @@ function encodeProjectId(cwd: string): string {
   return cwd.replace(/[/.]/g, "-");
 }
 
+/** Short unique id for queued messages. */
+function cryptoId(): string {
+  try {
+    return crypto.randomUUID().slice(0, 8);
+  } catch {
+    return Math.random().toString(36).slice(2, 10);
+  }
+}
+
+/**
+ * Sessions currently being steered — while a session id is in here, the turn's
+ * `finally` block must NOT auto-drain the queue (the steer flow is starting the
+ * next turn itself). Module-level (not React/persisted state) so it's readable
+ * synchronously inside the send loop.
+ */
+const _steering = new Set<string>();
+
+/**
+ * The in-flight `sendMessage` promise per session, so `steerMessage` can await
+ * the aborted turn's teardown (transcript reconcile) BEFORE starting the steer
+ * turn — keeping transcript writes ordered instead of racing. Module-level,
+ * matching `_steering`.
+ */
+const _sendPromises = new Map<string, Promise<void>>();
+
+/** A tool call observed live in the stream (for the shimmering "running" line). */
+export type RunningTool = {
+  name: string;
+  /** Best-effort one-line detail (command / path / pattern), may be empty
+   *  early since tool input streams in after the block starts. */
+  detail: string;
+};
+
 /** Live stream state for a session while a turn is generating. */
 export type StreamState = {
   /** Accumulated assistant text from stream deltas. */
@@ -40,7 +73,34 @@ export type StreamState = {
   pendingUserText: string;
   active: boolean;
   error?: string;
+  /** The tool call currently executing (drives the live shimmer line), or null
+   *  when the model is generating text rather than running a tool. */
+  runningTool?: RunningTool | null;
 };
+
+/**
+ * A message the user composed WHILE a turn was still generating. It waits in
+ * the per-session queue and is auto-sent as the next turn once the current one
+ * finishes (unless that turn errored — then draining pauses). "Steer" sends one
+ * immediately by interrupting the running turn.
+ */
+export type QueuedMessage = {
+  id: string;
+  text: string;
+  images: string[];
+  model?: string;
+  permissionMode?: string;
+};
+
+/**
+ * Per-session activity, for the sidebar status glyph:
+ *  - "running":     a turn is generating for this session right now (spinner).
+ *  - "done-unseen": a turn finished but the user hasn't opened the chat since
+ *                   (blue dot) — cleared when they select it.
+ *  - "needs-input": the turn is waiting on the user (circular exclamation).
+ * A session with no entry shows its normal git glyph (or nothing).
+ */
+export type SessionActivity = "running" | "done-unseen" | "needs-input";
 
 type SessionState = {
   projects: ProjectSummary[];
@@ -54,6 +114,12 @@ type SessionState = {
   serverError: string | null;
   /** AbortControllers for in-flight sends, keyed by session (not persisted). */
   _aborts: Record<string, AbortController>;
+  /** Messages queued while a turn is generating, keyed by session. Drained
+   *  one-at-a-time as turns complete; steering sends one immediately. */
+  queued: Record<string, QueuedMessage[]>;
+  /** Sidebar status per session (running / done-unseen / needs-input). A
+   *  missing entry means "no special status". Not persisted. */
+  sessionActivity: Record<string, SessionActivity>;
 
   // --- reads ---
   loadProjects: () => Promise<void>;
@@ -78,8 +144,39 @@ type SessionState = {
     images?: string[];
     model?: string;
     permissionMode?: string;
+    /** Internal: a drained/queued turn for a session the user may have navigated
+     *  away from — must NOT steal `active`/navigation. Foreground sends omit it. */
+    background?: boolean;
   }) => Promise<void>;
   abortSend: (sessionId: string) => void;
+
+  /** Set (or clear, with null) a session's sidebar status glyph. */
+  setSessionActivity: (
+    sessionId: string,
+    activity: SessionActivity | null,
+  ) => void;
+
+  // --- message queue (send-while-generating) ---
+  /** Queue a message to auto-send after the current turn (returns its id). */
+  enqueueMessage: (
+    sessionId: string,
+    msg: Omit<QueuedMessage, "id">,
+  ) => string;
+  /** Remove a queued message without sending it. */
+  removeQueued: (sessionId: string, id: string) => void;
+  /** Reorder a queued message to the front of the queue. */
+  moveQueuedToFront: (sessionId: string, id: string) => void;
+  /**
+   * Steer: send a queued message NOW — interrupt (abort) the running turn, then
+   * immediately start a new turn with this message. Mirrors the CLI's
+   * interrupt-then-send behavior.
+   */
+  steerMessage: (
+    projectId: string,
+    sessionId: string,
+    cwd: string,
+    id: string,
+  ) => Promise<void>;
 
   // --- mutations (server-backed) ---
   renameSession: (
@@ -144,6 +241,107 @@ function extractDelta(data: unknown): string {
   return "";
 }
 
+/**
+ * Whether a stream frame indicates the turn is now waiting on the USER — e.g.
+ * plan mode produced a plan that needs approval, or a tool permission couldn't
+ * be auto-answered in the current mode. Best-effort: the headless CLI usually
+ * auto-decides permissions, so this mainly catches plan-approval results.
+ */
+function detectNeedsInput(data: unknown): boolean {
+  if (!data || typeof data !== "object") return false;
+  const d = data as Record<string, unknown>;
+  // The CLI's end-of-turn `result` frame.
+  if (d.type === "result") {
+    const subtype = typeof d.subtype === "string" ? d.subtype : "";
+    // Plan mode surfaces a plan for approval; a permission prompt that stopped
+    // the turn shows up as a non-success subtype mentioning permission/approval.
+    if (/plan|permission|approval|input|ask/i.test(subtype)) return true;
+    // Some builds attach a permission-denials array when a tool needs approval.
+    const denials = d.permission_denials;
+    if (Array.isArray(denials) && denials.length > 0) return true;
+  }
+  return false;
+}
+
+/** One-line detail for a live tool (command / path / pattern / url). */
+function toolDetail(name: string, input: unknown): string {
+  const n = name.toLowerCase();
+  const rec =
+    typeof input === "object" && input !== null
+      ? (input as Record<string, unknown>)
+      : undefined;
+  const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+  if (rec) {
+    if (n === "bash")
+      return (str(rec.command) ?? "").replace(/\s+/g, " ").trim();
+    if (n === "read" || n === "write" || n === "edit" || n === "multiedit")
+      return str(rec.file_path) ?? str(rec.path) ?? "";
+    if (n === "grep") return str(rec.pattern) ?? "";
+    if (n === "glob" || n === "ls") return str(rec.path) ?? str(rec.pattern) ?? "";
+    if (n === "websearch") return str(rec.query) ?? "";
+    if (n === "webfetch") return str(rec.url) ?? "";
+    if (n === "task") return str(rec.description) ?? str(rec.subagent_type) ?? "";
+  }
+  return "";
+}
+
+/**
+ * Detect tool activity in a stream frame so the UI can show a shimmering
+ * "Running <tool> …" line for the live step.
+ *  - Returns `{name, detail}` when a tool_use STARTS (content_block_start or a
+ *    full assistant message with a tool_use block).
+ *  - Returns "clear" when the model resumes text or the turn produces a
+ *    tool_result (the tool finished).
+ *  - Returns null for frames that say nothing about tool state.
+ */
+function extractToolEvent(
+  data: unknown,
+): { name: string; detail: string } | "clear" | null {
+  if (!data || typeof data !== "object") return null;
+  const d = data as Record<string, unknown>;
+  const evt =
+    d.type === "stream_event" && d.event && typeof d.event === "object"
+      ? (d.event as Record<string, unknown>)
+      : d;
+
+  // Partial-message events: a tool_use content block starting.
+  if (evt.type === "content_block_start") {
+    const block = evt.content_block as Record<string, unknown> | undefined;
+    if (block && block.type === "tool_use" && typeof block.name === "string") {
+      return { name: block.name, detail: toolDetail(block.name, block.input) };
+    }
+  }
+  // A text delta means the model is writing prose again → no tool running.
+  if (evt.type === "content_block_delta") {
+    const delta = evt.delta as Record<string, unknown> | undefined;
+    if (delta && delta.type === "text_delta") return "clear";
+  }
+
+  // Full CLI messages (non-partial): assistant with tool_use, or a user message
+  // carrying tool_result (which means the last tool finished).
+  const msg = d.message as Record<string, unknown> | undefined;
+  const role = (d.type as string) === "assistant" || (d.type as string) === "user"
+    ? (d.type as string)
+    : undefined;
+  const content = Array.isArray(msg?.content) ? (msg!.content as unknown[]) : null;
+  if (content) {
+    // Last tool_use in an assistant message = the tool about to run.
+    if (role === "assistant") {
+      for (let i = content.length - 1; i >= 0; i--) {
+        const b = content[i] as Record<string, unknown>;
+        if (b?.type === "tool_use" && typeof b.name === "string") {
+          return { name: b.name, detail: toolDetail(b.name, b.input) };
+        }
+      }
+    }
+    // A tool_result in a user message = the running tool completed.
+    if (role === "user" && content.some((b) => (b as Record<string, unknown>)?.type === "tool_result")) {
+      return "clear";
+    }
+  }
+  return null;
+}
+
 export const useSessionStore = create<SessionState>()(
   persist(
     (set, get) => ({
@@ -154,6 +352,22 @@ export const useSessionStore = create<SessionState>()(
       active: null,
       serverError: null,
       _aborts: {},
+      queued: {},
+      sessionActivity: {},
+
+      setSessionActivity: (sessionId, activity) => {
+        set((st) => {
+          if (activity === null) {
+            if (!(sessionId in st.sessionActivity)) return {};
+            const { [sessionId]: _drop, ...rest } = st.sessionActivity;
+            return { sessionActivity: rest };
+          }
+          if (st.sessionActivity[sessionId] === activity) return {};
+          return {
+            sessionActivity: { ...st.sessionActivity, [sessionId]: activity },
+          };
+        });
+      },
 
       loadProjects: async () => {
         try {
@@ -193,6 +407,12 @@ export const useSessionStore = create<SessionState>()(
         // Switch instantly: set active synchronously so the view swaps to the
         // (already-cached) transcript with no await in the critical path.
         set({ active: { projectId, sessionId } });
+        // Opening a chat clears its "finished in the background" blue dot (the
+        // user has now seen it). A still-running spinner stays; a needs-input
+        // glyph stays until the user actually responds.
+        if (get().sessionActivity[sessionId] === "done-unseen") {
+          get().setSessionActivity(sessionId, null);
+        }
         // If we already have this transcript cached, don't refetch on the click
         // path — that added network latency to every switch AND replaced the
         // cached object with a new reference, forcing every transcript-keyed
@@ -282,19 +502,37 @@ export const useSessionStore = create<SessionState>()(
         const isNew = !input.sessionId;
         const sessionId = input.sessionId || crypto.randomUUID();
 
+        // Publish this turn's promise so steerMessage can await its teardown.
+        let resolveSend: () => void = () => {};
+        _sendPromises.set(
+          sessionId,
+          new Promise<void>((r) => {
+            resolveSend = r;
+          }),
+        );
+
         const controller = new AbortController();
-        set((st) => ({
-          active: { projectId, sessionId },
-          _aborts: { ...st._aborts, [sessionId]: controller },
-          streaming: {
-            ...st.streaming,
-            [sessionId]: {
-              text: "",
-              pendingUserText: text,
-              active: true,
+        set((st) => {
+          // Mark this session "running" for the sidebar spinner (and clear any
+          // stale done/needs-input flag it may have carried).
+          const { [sessionId]: _old, ...restActivity } = st.sessionActivity;
+          return {
+            // A background turn (drained queue / steer of a chat the user has
+            // navigated away from) must NOT steal `active` — keep the current
+            // view. Foreground sends focus their session as before.
+            ...(input.background ? {} : { active: { projectId, sessionId } }),
+            _aborts: { ...st._aborts, [sessionId]: controller },
+            sessionActivity: { ...restActivity, [sessionId]: "running" },
+            streaming: {
+              ...st.streaming,
+              [sessionId]: {
+                text: "",
+                pendingUserText: text,
+                active: true,
+              },
             },
-          },
-        }));
+          };
+        });
 
         // Smooth typewriter reveal: the CLI emits text in a few big chunks, so
         // appending them raw looks jumpy. Instead we accumulate into `target`
@@ -303,6 +541,12 @@ export const useSessionStore = create<SessionState>()(
         let target = "";
         let revealed = 0;
         let raf = 0;
+        // Whether this turn ended abnormally (server error or client abort).
+        // A failed turn PAUSES queue draining so a bad chain doesn't cascade.
+        let turnFailed = false;
+        // Whether the turn ended waiting on the user (plan approval / a question
+        // in a permission-restricted mode) → sidebar shows a needs-input glyph.
+        let needsInput = false;
         const tick = () => {
           const cur = get().streaming[sessionId];
           if (!cur) {
@@ -352,6 +596,7 @@ export const useSessionStore = create<SessionState>()(
           for await (const frame of streamMessage(payload, controller.signal)) {
             if (frame.event === "done") break;
             if (frame.event === "error") {
+              turnFailed = true;
               set((st) => ({
                 streaming: {
                   ...st.streaming,
@@ -375,11 +620,36 @@ export const useSessionStore = create<SessionState>()(
               target += chunk;
               startTicker();
             }
+            // Track the live tool call so the UI can shimmer a "Running …" line.
+            const toolEvt = extractToolEvent(frame.data);
+            if (toolEvt !== null) {
+              const runningTool = toolEvt === "clear" ? null : toolEvt;
+              set((st) => {
+                const cur = st.streaming[sessionId];
+                if (!cur) return {};
+                return {
+                  streaming: {
+                    ...st.streaming,
+                    [sessionId]: { ...cur, runningTool },
+                  },
+                };
+              });
+            }
+            // Detect a turn that ends waiting on the user (plan approval, or a
+            // permission prompt that couldn't be auto-answered).
+            if (detectNeedsInput(frame.data)) needsInput = true;
           }
           // Flush any remaining buffered characters instantly at end of turn.
           revealed = target.length;
         } catch (e) {
-          set({ serverError: String(e) });
+          // An AbortError is an intentional interrupt (cancel or steer), not a
+          // failure that should pause the queue; anything else is a real error.
+          const aborted =
+            e instanceof DOMException && e.name === "AbortError";
+          if (!aborted) {
+            turnFailed = true;
+            set({ serverError: String(e) });
+          }
         } finally {
           if (raf) cancelAnimationFrame(raf);
           // The session file lands in the dir for its cwd, which for a NEW chat
@@ -420,12 +690,133 @@ export const useSessionStore = create<SessionState>()(
             const { [sessionId]: _a, ...restAborts } = st._aborts;
             return { streaming: restStreaming, _aborts: restAborts };
           });
+
+          // Drain the queue: auto-send the next queued message as the next turn.
+          // Skip when (a) this turn failed (pause on error, per the spec),
+          // (b) a steer is in progress for this session (steerMessage starts the
+          // next turn itself), or (c) nothing is queued.
+          let drained = false;
+          if (!turnFailed && !_steering.has(sessionId)) {
+            const next = (get().queued[sessionId] ?? [])[0];
+            if (next) {
+              drained = true;
+              set((st) => ({
+                queued: {
+                  ...st.queued,
+                  [sessionId]: (st.queued[sessionId] ?? []).filter(
+                    (m) => m.id !== next.id,
+                  ),
+                },
+              }));
+              // Fire-and-forget: the next turn runs its own send/stream/drain.
+              // Use the reconciled project id so a new session stays consistent.
+              // `background: true` when the user has navigated away, so draining
+              // the queue doesn't yank them back to this chat.
+              const stillOpen = get().active?.sessionId === sessionId;
+              void get().sendMessage({
+                projectId: realProjectId,
+                sessionId,
+                cwd,
+                text: next.text,
+                images: next.images,
+                model: next.model,
+                permissionMode: next.permissionMode,
+                background: !stillOpen,
+              });
+            }
+          }
+
+          // Update the sidebar status glyph, unless another turn is taking over
+          // (drain / steer), which will set its own "running".
+          if (!drained && !_steering.has(sessionId)) {
+            const isOpen = get().active?.sessionId === sessionId;
+            const cur = get().sessionActivity[sessionId];
+            if (needsInput) {
+              // The turn is waiting on the user — keep/mark needs-input even if
+              // the chat is open (the user still has to act).
+              get().setSessionActivity(sessionId, "needs-input");
+            } else if (isOpen) {
+              // The user is looking at this chat → nothing to flag; mark seen.
+              get().setSessionActivity(sessionId, null);
+            } else if (cur === "running") {
+              // Finished in the background, unseen → blue dot.
+              get().setSessionActivity(sessionId, "done-unseen");
+            }
+          }
+
+          // Signal that this turn's teardown is complete (steer awaits this).
+          _sendPromises.delete(sessionId);
+          resolveSend();
         }
       },
 
       abortSend: (sessionId) => {
         const c = get()._aborts[sessionId];
         c?.abort();
+      },
+
+      enqueueMessage: (sessionId, msg) => {
+        const id = `q-${cryptoId()}`;
+        set((st) => ({
+          queued: {
+            ...st.queued,
+            [sessionId]: [...(st.queued[sessionId] ?? []), { id, ...msg }],
+          },
+        }));
+        return id;
+      },
+
+      removeQueued: (sessionId, id) => {
+        set((st) => {
+          const list = (st.queued[sessionId] ?? []).filter((m) => m.id !== id);
+          return { queued: { ...st.queued, [sessionId]: list } };
+        });
+      },
+
+      moveQueuedToFront: (sessionId, id) => {
+        set((st) => {
+          const list = st.queued[sessionId] ?? [];
+          const target = list.find((m) => m.id === id);
+          if (!target) return {};
+          const rest = list.filter((m) => m.id !== id);
+          return { queued: { ...st.queued, [sessionId]: [target, ...rest] } };
+        });
+      },
+
+      steerMessage: async (projectId, sessionId, cwd, id) => {
+        const list = get().queued[sessionId] ?? [];
+        const msg = list.find((m) => m.id === id);
+        if (!msg) return;
+        // Remove it from the queue up front so the drain logic won't also send
+        // it when the (soon-to-be-aborted) turn's finally block runs.
+        set((st) => ({
+          queued: {
+            ...st.queued,
+            [sessionId]: (st.queued[sessionId] ?? []).filter((m) => m.id !== id),
+          },
+        }));
+        // Interrupt the running turn (if any). The aborted turn's finally block
+        // reconciles the partial transcript from disk; `_steering` tells it to
+        // NOT auto-drain (we're about to send this steer message ourselves).
+        const running = Boolean(get().streaming[sessionId]?.active);
+        if (running) {
+          _steering.add(sessionId);
+          const pending = _sendPromises.get(sessionId);
+          get().abortSend(sessionId);
+          // Await the aborted turn's teardown (transcript reconcile) so the new
+          // turn's writes stay ordered, instead of racing on a fixed delay.
+          if (pending) await pending;
+          _steering.delete(sessionId);
+        }
+        await get().sendMessage({
+          projectId,
+          sessionId,
+          cwd,
+          text: msg.text,
+          images: msg.images,
+          model: msg.model,
+          permissionMode: msg.permissionMode,
+        });
       },
 
       renameSession: async (projectId, sessionId, title) => {

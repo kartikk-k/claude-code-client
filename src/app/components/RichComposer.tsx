@@ -63,7 +63,14 @@ export type RichComposerProps = {
     model: string;
     permissionMode: string;
   }) => void;
+  /** Hard-disable: no session/cwd to run in. Blocks typing entirely. */
   disabled?: boolean;
+  /**
+   * A turn is currently generating. Typing is still allowed — sending now
+   * QUEUES the message (auto-sent after the turn). The send button becomes a
+   * "queue" affordance and the placeholder hints at it.
+   */
+  isGenerating?: boolean;
   cwd?: string;
   /** Active session id — keys the per-chat draft persisted in the UI store. */
   sessionId?: string;
@@ -239,6 +246,7 @@ const PillButton = React.forwardRef<
 export function RichComposer({
   onSend,
   disabled = false,
+  isGenerating = false,
   cwd,
   sessionId,
   gitBranch,
@@ -835,7 +843,7 @@ export function RichComposer({
                   aria-hidden
                   className="pointer-events-none absolute left-4 top-3 text-[15px] leading-[22.75px] text-text-secondary"
                 >
-                  Do anything
+                  {isGenerating ? "Add to queue…" : "Do anything"}
                 </span>
               ) : null}
               <div
@@ -929,10 +937,11 @@ export function RichComposer({
                 }
               />
 
-              {/* Send */}
+              {/* Send (or queue, while a turn is generating) */}
               <button
                 type="button"
-                aria-label="Send message"
+                aria-label={isGenerating ? "Queue message" : "Send message"}
+                title={isGenerating ? "Queue message" : undefined}
                 disabled={!canSend}
                 onClick={doSend}
                 className={[
